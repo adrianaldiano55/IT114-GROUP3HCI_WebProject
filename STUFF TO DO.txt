@@ -1,0 +1,45 @@
+MODULES TO MAKE FOR FOOD DELIVERY SYSTEM
+
+config.php
+index.php
+user_login.php 
+DB .sql
+customer_dashboard.php
+staff_dashboard.php
+admin_dashboard.php
+
+
+AUTHORITY ROLES FOR THE SYSTEM (BASED ON HEIRARCHY):
+
+1. Admins
+2. Staffs / Delivery 
+3. Customers
+
+DATABASES AND FIELDS
+
+Accounts
+-> userid (Int 5)
+-> username (Varchar 50)
+-> email (Varchar 50)
+-> password (Varchar 50)
+-> usertype (Varchar 10) (customer,staff,admin)
+-> last_login (DATETIME)
+-> last_logout (DATETIME)
+-> created_at (DATETIME)
+-> is_active (TRUE/FALSE)
+
+Food / Product
+-> name (Varchar 50)
+-> prodid (Varchar 5)
+-> price (Decimal??? 2)
+-> discount (Percentage or Decimal??? 2) [UNSURE IF NEEDED : /]
+-> total (Int 5)
+-> disprice (Decimal)
+
+Order / Delivery
+-> customerid (Varchar 5) -> Accounts/userid
+-> prodid (Varchar 5) [ UNSURE IF INDIVIDUAL ORDER RECORD PER PRODUCT OR GROUP THEM]
+-> tprice (Decimal?? 4) [GET FROM SYSTEM, CALCULATED TOTAL WITH THE DISCOUNT PRICES]
+-> deliveryid (Var 5) -> Accounts/userid
+-> created_at (DATETIME)
+-> duedate (DATETIME ??? )
