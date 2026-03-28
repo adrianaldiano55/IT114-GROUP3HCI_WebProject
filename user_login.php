@@ -1,26 +1,28 @@
 <?php
 require_once 'config.php';
-
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $password = $_POST['password'] ?? '';
     $username = $_POST['username'] ?? '';
-    $email = $_POST['email'] ?? '';
-    $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ? AND email = ?");
-    $stmt->execute([$username, $email]);
+    
+    // Updated query: Now only searches by username
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ?");
+    $stmt->execute([$username]);
     $users = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    // Verifies if user exist, and if password hash and email match
-    if ($users && password_verify($password, $users['password']) && $users['email'] === $email && $users['username'] === $username) {
+    // Verifies if user exists and if password hash matches
+    if ($users && password_verify($password, $users['password'])) {  
+        $_SESSION['user_id'] = $users['user_id'];
         $_SESSION['password'] = $users['password'];
         $_SESSION['usertype'] = $users['usertype'];
         $_SESSION['username'] = $users['username'];
-        $_SESSION['email'] = $users['email'];
-    // Redirects user based on usertype (default is customer)
+        $_SESSION['email'] = $users['email'];           
+        
+        // Redirects user based on usertype
         switch ($users['usertype']) {
             case 'customer':
-                header('Location: user_dashboard.php');
+                header('Location: customer_dashboard.php');
                 break;
             case 'staff':
                 header('Location: staff_dashboard.php');
@@ -43,10 +45,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <title>User Login</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
-    <!-- Bootstrap 5 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 
-    <!-- Google Font -->
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
     <style>
@@ -92,7 +92,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         .brand-title {
             font-weight: 700;
-            color: #5a0f1b;
+            color:  #000000;
         }
 
         /* ===============================
@@ -105,7 +105,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .form-control:focus {
-            border-color: #7b1e2b;
+            border-color: #ff7a18;
             box-shadow: 0 0 0 0.2rem rgba(123, 30, 43, 0.25);
         }
 
@@ -113,7 +113,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
            BUTTON STYLE
         ================================*/
         .btn-custom {
-            background: linear-gradient(135deg, #7b1e2b, #b33a3a);
+            background: linear-gradient(135deg, #ff7a18, #ff3d00);
             color: #fff;
             font-weight: 500;
             padding: 12px;
@@ -122,7 +122,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .btn-custom:hover {
-            background: linear-gradient(135deg, #5a0f1b, #8e2a2a);
+            background: linear-gradient(135deg, #cd6300, #000000);
             transform: scale(1.03);
             color: #fff;
         }
@@ -140,6 +140,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     <h3 class="brand-title text-center mb-4">Login Account</h3>
 
+                    <?php if ($error): ?>
+                        <div class="alert alert-danger py-2" style="border-radius: 10px; font-size: 0.9rem;">
+                            <?= htmlspecialchars($error) ?>
+                        </div>
+                    <?php endif; ?>
+
                     <form method="post">
                         <input type="hidden" name="create" value="1">
 
@@ -148,14 +154,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             <input type="text" name="username" class="form-control" required>
                         </div>
 
-                        <div class="mb-3">
+                        <div class="mb-4">
                             <label class="form-label">Password</label>
                             <input type="password" name="password" class="form-control" required>
-                        </div>
-
-                        <div class="mb-4">
-                            <label class="form-label">Email</label>
-                            <input type="email" name="email" class="form-control" required>
                         </div>
 
                         <button type="submit" class="btn btn-custom w-100">

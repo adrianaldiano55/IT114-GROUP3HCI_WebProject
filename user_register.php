@@ -83,7 +83,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         .brand-title {
             font-weight: 700;
-            color: #5a0f1b;
+            color: #000000;
         }
 
         /* ===============================
@@ -96,7 +96,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .form-control:focus {
-            border-color: #7b1e2b;
+            border-color: #cf7207;
             box-shadow: 0 0 0 0.2rem rgba(123, 30, 43, 0.25);
         }
 
@@ -104,7 +104,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
            BUTTON STYLE
         ================================*/
         .btn-custom {
-            background: linear-gradient(135deg, #7b1e2b, #b33a3a);
+            background: linear-gradient(135deg, #ff7a18, #ff3d00);
             color: #fff;
             font-weight: 500;
             padding: 12px;
@@ -113,7 +113,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         .btn-custom:hover {
-            background: linear-gradient(135deg, #5a0f1b, #8e2a2a);
+            background: linear-gradient(135deg, #cd6300, #000000);
             transform: scale(1.03);
             color: #fff;
         }

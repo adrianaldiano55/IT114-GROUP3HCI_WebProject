@@ -4,7 +4,7 @@
 if(!isset($_SESSION))
 	session_start();
 
-$dsn = 'mysql:host=127.0.0.1;dbname=fayds;charset=utf8mb4';
+$dsn = 'mysql:host=127.0.0.1;dbname=faydss;charset=utf8mb4';
 $dbUser = 'root';
 $dbPass = '';
 
