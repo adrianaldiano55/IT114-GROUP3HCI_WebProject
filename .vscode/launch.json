@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "node",                     // Node.js runtime
+            "request": "launch",                // Launch a file
+            "name": "Launch server.js",         // Friendly name in VS Code
+            "skipFiles": ["<node_internals>/**"], 
+            "program": "${workspaceFolder}/server.js",  // Path to your server file
+            "cwd": "${workspaceFolder}",        // Current working directory
+            "console": "integratedTerminal",    // Use VS Code terminal to see output
+            "env": {                            // Optional: environment variables
+                "NODE_ENV": "development",
+                "PORT": "3000"
+            },
+            "restart": true                     // Optional: auto-restart on crash
+        }
+    ]
+}
