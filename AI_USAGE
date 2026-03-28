@@ -1,3 +1,3 @@
-INSTANCES WHERE AI WAS USED FOR THE PROJECT: 0
-
-(NO AI USAGE SO FAR 8 ) )
+AI_Usage
+This system leverages the capabilities of multiple AI-powered development tools, including ChatGPT, Gemini and the GitHub Copilot extension in Visual Studio Code, to support the design and implementation of its features and overall codebase. These tools assist developers by generating code suggestions, providing logical structures, and helping troubleshoot issues during development.
+In particular, AI has been instrumental in implementing WebSocket functionality, enabling real-time communication between the client and server through efficient event-driven interactions. It has also supported the construction and optimization of database queries, as well as various database operations such as data retrieval, insertion, and updates. Additionally, AI tools have contributed to the development of JavaScript functions, enhancing interactivity and application logic, and the creation of HTML modals, improving the system’s user interface and user experience.
