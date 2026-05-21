@@ -8,21 +8,21 @@ $user_id = $_SESSION['user_id'];
 // 1. Fetch products as a Key-Pair (ID => Name)
 $productStmt = $pdo->query("SELECT prod_id, name FROM products");
 $products = $productStmt->fetchAll(PDO::FETCH_KEY_PAIR); 
+$status = $_GET['status'] ?? 'PROCESSING';
 
-$ordStmt = $pdo->prepare("
-    SELECT *
-    FROM orders
-    WHERE customer_id = ?
-    ORDER BY created_at DESC
+ $ordStmt = $pdo->prepare("
+SELECT *
+FROM orders
+WHERE UPPER(status) = ?
+ORDER BY created_at DESC
 ");
-$ordStmt->execute([$user_id]);
+$ordStmt->execute([$status]);
 $orders = $ordStmt->fetchAll(PDO::FETCH_ASSOC);
 
 // 2. Only fetch items if there are orders to avoid SQL errors
 if (!empty($orders)) {
     $orderIds = array_column($orders, 'order_id');
     $placeholders = implode(',', array_fill(0, count($orderIds), '?'));
-    
     $oritStmt = $pdo->prepare("
         SELECT *
         FROM order_items
@@ -31,27 +31,20 @@ if (!empty($orders)) {
     $oritStmt->execute($orderIds);
     $order_items = $oritStmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // 3. Map items to orders
-    foreach ($orders as &$order) {
-        $summary = [];
-        foreach ($order_items as $item) {
-            if ($item['order_id'] == $order['order_id']) {
-                $pId = $item['product']; 
-                $prodName = $products[$pId] ?? 'Unknown Item';
-                $summary[] = $prodName . ' x ' . $item['quantity'];
-            }
+ // 3. Map items to orders
+foreach ($orders as &$order) {
+    $summary = [];
+    foreach ($order_items as $item) {
+        if ($item['order_id'] == $order['order_id']) {
+             $pId = $item['product']; 
+             $prodName = $products[$pId] ?? 'Unknown Item';
+             $summary[] = $prodName . ' x ' . $item['quantity'];
         }
+    }
         $order['product_summary'] = !empty($summary) ? implode('<br>', $summary) : 'No items found';
     }
 }
 
-// Fetch delivery staff
-$staffStmt = $pdo->query("
-    SELECT user_id, username
-    FROM users
-    WHERE usertype = 'staff'
-");
-$staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
 
 <!DOCTYPE html>
@@ -59,7 +52,7 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Orders</title>
+    <title>Staff Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 
@@ -167,26 +160,12 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
     }
 </style>
 </head>
-<body onload="checkDeletedOrders()">
+<body>
 
 <nav class="navbar navbar-expand-lg sticky-top">
     <div class="container-fluid d-flex justify-content-between align-items-center px-4">
-        <a class="navbar-brand p-0" href="customer_dashboard.php">
-            <img src="images/logo.png" alt="Logo" class="nav-logo"> 
-        </a>
-
+        <img src="images/logo.png" alt="Logo" class="nav-logo"> 
         <div class="header-right">
-            <button class="header-icon-btn" data-bs-toggle="modal" data-bs-target="#cartItemsModal" onclick="renderCartModal()">
-                <svg width="24" height="24" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M4.347 18.31a1.847 1.847 0 1 0 0-3.693 1.847 1.847 0 0 0 0 3.693M14.503 18.31a1.847 1.847 0 1 0 0-3.694 1.847 1.847 0 0 0 0 3.694" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
-                    <path d="M14.503 14.617H4.347V1.69H2.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
-                    <path d="m4.347 3.537 12.926.923-.923 6.463H4.347" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
-                </svg>
-                <span class="cart-badge d-none" id="cartBadgeCount">0</span>
-            </button>
-
-            <a href="customer_dashboard.php" class="btn btn-sm btn-dark rounded-pill px-3 fw-bold" style="font-size: 0.8rem;">Back to Menu</a>
-
             <div class="dropdown">
                 <button class="header-icon-btn dropdown-toggle" type="button" data-bs-toggle="dropdown">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -208,17 +187,12 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
     <div class="orders-container">
         <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center mb-4">
             <div>
-                <h3 class="fw-bold mb-0">My Purchase History</h3>
-                <p class="text-muted small">Manage and track your recent orders</p>
-            </div>
-            <div class="d-flex gap-2">
-                <input type="text" id="orderSearch" class="form-control search-input" placeholder="Search Order #">
+                <h3 class="fw-bold mb-0">Order Dashboard</h3>
+                <p class="text-muted small">Manage and track customer orders</p>
             </div>
         </div>
-
         <div class="mb-4">
             <div class="btn-group" role="group">
-                <button class="btn btn-outline-warning active status-filter-btn" data-status="ALL" onclick="setStatusFilter('ALL')">All Orders</button>
                 <button class="btn btn-outline-warning status-filter-btn" data-status="PROCESSING" onclick="setStatusFilter('PROCESSING')">Processing</button>
                 <button class="btn btn-outline-warning status-filter-btn" data-status="PENDING" onclick="setStatusFilter('PENDING')">Pending</button>
                 <button class="btn btn-outline-warning status-filter-btn" data-status="COMPLETED" onclick="setStatusFilter('COMPLETED')">Completed</button>
@@ -257,9 +231,6 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
                                 <td class="small text-muted"><?= date('M d, Y h:i A', strtotime($o['created_at'])) ?></td>
                                 <td class="text-end">
                                     <div class="d-flex justify-content-end gap-2">
-                                        <?php if ($rawStatus === 'PROCESSING' || $rawStatus === 'COMPLETED'): ?>
-                                            <span class="fw-bold text-success px-2" style="cursor: default;"></span>
-                                        <?php endif; ?>
                                         <button class="btn btn-sm btn-outline-secondary fw-bold px-3 rounded-pill" 
                                             onclick="viewOrderDetails(
                                                 '<?= $displayStr ?>',
@@ -270,18 +241,26 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
                                             )">
                                             Details
                                         </button>
-                                        <button class="btn btn-sm btn-outline-primary px-3 rounded-pill"
-                                            onclick="openUpdateModal(
-                                                <?= (int)$o['order_id'] ?>,
-                                                '<?= $due ?>',
-                                                '<?= addslashes($addr) ?>'
-                                            )">
-                                            Update
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-danger px-2 rounded-pill"
-                                            onclick="deleteOrder(<?= (int)$o['order_id'] ?>)">
-                                            🗑
-                                        </button>
+                                        <?php if ($rawStatus === 'PROCESSING'): ?>
+                                            <button class="btn btn-sm btn-outline-primary px-3 rounded-pill"
+                                                onclick="openUpdateModal(
+                                                    <?= (int)$o['order_id'] ?>,
+                                                    '<?= $due ?>',
+                                                    '<?= addslashes($addr) ?>'
+                                                )">
+                                                Accept
+                                            </button>
+                                        <?php endif; ?>
+                                        <?php if ($rawStatus === 'PENDING'): ?>
+                                            <button class="btn btn-sm btn-outline-primary px-3 rounded-pill"
+                                                onclick="openUpdateModal(
+                                                    <?= (int)$o['order_id'] ?>,
+                                                    '<?= $due ?>',
+                                                    '<?= addslashes($addr) ?>'
+                                                )">
+                                                Complete
+                                            </button>
+                                        <?php endif; ?>
                                     </div>
                                 </td>
                             </tr>
@@ -327,43 +306,30 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
     </div>
 </div>
 
-<div class="modal fade" id="cartItemsModal" tabindex="-1">
-    <div class="modal-dialog modal-lg modal-dialog-centered">
-        <div class="modal-content" style="border-radius: 20px; overflow: hidden;">
-            <div class="modal-header"><h5 class="fw-bold m-0">Review Your Cart</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
-            <div class="modal-body p-0">
-                <div class="table-responsive">
-                    <table class="table align-middle m-0">
-                        <tbody id="cartModalBody"></tbody>
-                    </table>
-                </div>
-            </div>
-            <div class="modal-footer d-flex justify-content-between">
-                <h5 class="fw-bold">Total: ₱<span id="cartModalTotal">0.00</span></h5>
-                <button id="submitOrderBtn" class="btn btn-warning fw-bold px-4" data-bs-toggle="modal" data-bs-target="#deliveryModal" disabled>Proceed to Checkout</button>
-            </div>
-        </div>
-    </div>
-</div>
-
 <div class="modal fade" id="deliveryModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
+            <input type="hidden" id="updateOrderId">
             <div class="modal-header">
                 <h5 class="fw-bold">Update Delivery Details</h5>
                 <button class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body p-4">
-                <input type="hidden" id="updateOrderId">
                 <label class="form-label fw-bold">Due Time</label>
-                <input type="time" id="deliveryDueTime" class="form-control mb-3">
+                <div id="deliveryDueTime" class="form-control mb-3 bg-light"></div>
                 <label class="form-label fw-bold">Address</label>
-                <input type="text" id="deliveryAddress" class="form-control mb-3">
+                <div id="deliveryAddress" class="form-control mb-3 bg-light"></div>
             </div>
                 <div class="modal-footer">
-                <button class="btn btn-success w-100" onclick="submitDeliveryUpdate()">
-                    Save Changes
-                </button>
+                <?php if ($status === 'PROCESSING'): ?>
+                    <button class="btn btn-primary w-100" onclick="submitDeliveryUpdate()">
+                        Accept Order
+                    </button>
+                <?php elseif ($status === 'PENDING'): ?>
+                    <button class="btn btn-primary w-100" onclick="submitDeliveryUpdate()">
+                        Complete Order
+                    </button>
+                <?php endif; ?>
             </div>
 
         </div>
@@ -375,7 +341,7 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
 let cart = {}; 
 const userid = "<?= $_SESSION['user_id'] ?>";
 
-const socket = new WebSocket("ws://localhost:3000?usertype=customer");
+const socket = new WebSocket("ws://localhost:3000?usertype=staff");
 
 socket.onopen = function() {
     socket.send(JSON.stringify({ event: "client_connected", userid: userid }));
@@ -401,11 +367,16 @@ socket.onmessage = function(event) {
         "category_created",
         "category_updated",
         "category_deleted",
-        "activity_alert"
     ];
     if (refreshEvents.includes(data.event)) {
         location.reload();
     }
+};
+// =========================
+// SET TABLE STATUS (NEW)
+// =========================
+function setStatusFilter(status) {
+    window.location.href = "?status=" + status;
 };
 
 
@@ -418,28 +389,8 @@ function viewOrderDetails(id, summary, due, addr, total) {
     document.getElementById('detDue').innerText = due;
     document.getElementById('detAddr').innerText = addr;
     document.getElementById('detTotal').innerText = total;
-
     new bootstrap.Modal(document.getElementById('orderDetailsModal')).show();
-}
-
-
-// =========================
-// DELETE ORDER (WEBSOCKET)
-// =========================
-function deleteOrder(orderId) {
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-        console.error("WebSocket not connected");
-        return;
-    }
-
-    if (!confirm("Are you sure you want to delete this order?")) return;
-
-    socket.send(JSON.stringify({
-        type: "delete_order",
-        payload: { orderId }
-    }));
-}
-
+};
 
 // =========================
 // OPEN UPDATE MODAL
@@ -447,11 +398,11 @@ function deleteOrder(orderId) {
 function openUpdateModal(orderId, due, address) {
     document.getElementById("updateOrderId").value = orderId;
 
-    document.getElementById("deliveryDueTime").value = convertToTimeInput(due);
-    document.getElementById("deliveryAddress").value = address;
+    document.getElementById("deliveryDueTime").innerText = due;
+    document.getElementById("deliveryAddress").innerText = address;
 
     new bootstrap.Modal(document.getElementById('deliveryModal')).show();
-}
+};
 
 
 // =========================
@@ -459,38 +410,39 @@ function openUpdateModal(orderId, due, address) {
 // =========================
 function submitDeliveryUpdate() {
     const orderId = document.getElementById("updateOrderId").value;
-    const dueTime = document.getElementById("deliveryDueTime").value;
-    const address = document.getElementById("deliveryAddress").value;
 
-    if (!dueTime || !address) {
-        alert("Please fill all fields.");
-        return;
-    }
+    let orderstatus = "";
+    <?php if ($status === 'PROCESSING'): ?>
+        orderstatus = "PENDING";
+    <?php elseif ($status === 'PENDING'): ?>
+        orderstatus = "COMPLETED";
+    <?php endif; ?>
 
-    updateOrderDelivery(orderId, dueTime, address);
+    updateOrderDelivery(orderId, orderstatus);
 
-    bootstrap.Modal.getInstance(document.getElementById('deliveryModal')).hide();
+    bootstrap.Modal.getInstance(
+        document.getElementById('deliveryModal')
+    ).hide();
 }
 
 
 // =========================
 // SEND UPDATE VIA WS
 // =========================
-function updateOrderDelivery(orderId, dueTime, address) {
+function updateOrderDelivery(orderId, orderstatus) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
         console.error("WebSocket not connected");
         return;
     }
 
     socket.send(JSON.stringify({
-        type: "update_order",
+        type: "update_staff_delivery",
         payload: {
-            orderId,
-            dueTime,
-            address
+            order_id: orderId,
+            status: orderstatus
         }
     }));
-}
+};
 
 
 // =========================
@@ -510,7 +462,7 @@ function convertToTimeInput(timeStr) {
     }
 
     return `${hours.toString().padStart(2, '0')}:${minutes}`;
-}
+};
 </script>
 </body>
 </html>

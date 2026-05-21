@@ -98,7 +98,7 @@ setInterval(() => {
 
         results.forEach(order => {
             const id = order.order_id;
-            const currentStatus = (order.status || 'pending').toLowerCase();
+            const currentStatus = (order.status || 'processing').toLowerCase();
 
             if (lastStatusMap[id] !== undefined && lastStatusMap[id] !== currentStatus) {
                 let statusMsg = "";
@@ -132,7 +132,7 @@ wss.on('connection', (ws) => {
     ws.on('message', (message) => {
         const data = JSON.parse(message);
 
-        switch (data.event) {
+        switch (data.event || data.type) {
             case "client_connected":
                 console.log(`[SYSTEM] Client Connected`);
                 db.query("SELECT details as message FROM audit_logs WHERE action != 'LOGIN' ORDER BY created_at DESC LIMIT 5", (err, logs) => {
@@ -157,7 +157,7 @@ wss.on('connection', (ws) => {
                 let formattedDueAt = data.due_time || data.due_date; 
                 if (formattedDueAt && formattedDueAt.length <= 10) formattedDueAt = `${formattedDueAt} 00:00:00`;
 
-                const orderQuery = `INSERT INTO orders (customer_id, staff_id, price_total, status, created_at, due_at, address) VALUES (?, NULL, ?, 'Pending', NOW(), ?, ?)`;
+                const orderQuery = `INSERT INTO orders (customer_id, staff_id, price_total, status, created_at, due_at, address) VALUES (?, NULL, ?, 'processing', NOW(), ?, ?)`;
                 const address = data.delivery_address || null;
 
                 db.query(orderQuery, [data.customer_id, totalOrderPrice, formattedDueAt, address], (err, result) => {
@@ -209,9 +209,206 @@ wss.on('connection', (ws) => {
                     broadcastLiveStats();
                 });
                 break;
-        }
+                case "delete_order":
+                    const delOrderId = data.payload.orderId;
+
+                    console.log(`[REQUEST] Delete Order #${delOrderId}`);
+
+                    // Optional: delete order items first (if FK not cascading)
+                    db.query("DELETE FROM order_items WHERE order_id = ?", [delOrderId], (itemErr) => {
+                        if (itemErr) console.error(itemErr);
+
+                        db.query("DELETE FROM orders WHERE order_id = ?", [delOrderId], (err) => {
+                            if (err) {
+                                console.error("Delete Error:", err);
+                                ws.send(JSON.stringify({
+                                    type: "error",
+                                    message: "Failed to delete order"
+                                }));
+                                return;
+                            }
+
+                            console.log(`[ACTIVITY] Order #${delOrderId} deleted`);
+
+                            broadcast(JSON.stringify({
+                                event: "order_deleted",
+                                orderId: delOrderId
+                            }));
+
+                            logActivity(0, "ORDER_DELETE", `Order #${delOrderId} deleted`);
+                            broadcastLiveStats();
+                        });
+                    });
+                break;
+                case "update_order":
+                    const updOrderId = data.payload.orderId;
+                    const newDueTime = data.payload.dueTime;
+                    const newAddress = data.payload.address;
+
+                     console.log(`[REQUEST] Update Order #${updOrderId}`);
+
+                    // Convert time to MySQL DATETIME format
+                    let formattedDue = null;
+                    if (newDueTime) {
+                        formattedDue = `${new Date().toISOString().split('T')[0]} ${newDueTime}:00`;
+                    }
+
+                    const updateQuery = `
+                       UPDATE orders 
+                        SET due_at = ?, address = ?
+                        WHERE order_id = ?
+                    `;
+
+                    db.query(updateQuery, [formattedDue, newAddress, updOrderId], (err) => {
+                        if (err) {
+                            console.error("Update Error:", err);
+                            ws.send(JSON.stringify({
+                                type: "error",
+                                message: "Failed to update order"
+                            }));
+                            return;
+                        }
+                        console.log(`[ACTIVITY] Order #${updOrderId} updated`);
+
+                        broadcast(JSON.stringify({
+                            event: "order_updated",
+                            payload: {
+                                orderId: updOrderId,
+                                dueTime: newDueTime,
+                                address: newAddress
+                            }
+                        }));
+
+                        logActivity(0, "ORDER_UPDATE", `Order #${updOrderId} updated`);
+                        broadcastLiveStats();
+                    });
+                break;
+                case "create_product":
+                    const { name: prodName, price, stock, discount, image: prodImage, category } = data.payload;
+                    db.query("INSERT INTO products (name, price, stock, discount, image_path, category) VALUES (?, ?, ?, ?, ?, ?)", [prodName, price, stock, discount, prodImage, category], (err, result) => {
+                        if (err) {
+                            console.error("Create Product Error:", err);
+                            ws.send(JSON.stringify({ event: "error", message: "Failed to create product" }));
+                            return;
+                        }
+                        const prodId = result.insertId;
+                        console.log(`[ACTIVITY] Product "${prodName}" created with ID ${prodId}`);
+                        broadcast(JSON.stringify({ event: "product_created", payload: { productId: prodId, name: prodName } }));
+                        logActivity(0, "PRODUCT_CREATE", `Created product "${prodName}"`);
+                    });
+                break;
+
+                case "update_product":
+                    const { prod_id, name: updProdName, price: updPrice, stock: updStock, discount: updDiscount, image: updImage, category: updCategory } = data.payload;
+                    db.query("UPDATE products SET name=?, price=?, stock=?, discount=?, image_path=?, category=? WHERE prod_id=?", [updProdName, updPrice, updStock, updDiscount, updImage, updCategory, prod_id], (err) => {
+                        if (err) {
+                            console.error("Update Product Error:", err);
+                            ws.send(JSON.stringify({ event: "error", message: "Failed to update product" }));
+                            return;
+                        }
+                        console.log(`[ACTIVITY] Product "${updProdName}" updated`);
+                        broadcast(JSON.stringify({ event: "product_updated", payload: { productId: prod_id, name: updProdName } }));
+                        logActivity(0, "PRODUCT_UPDATE", `Updated product "${updProdName}"`);
+                        broadcastLiveStats(); // In case stock changed
+                    });
+                break;
+
+                case "delete_product":
+                    const { productId } = data.payload;
+                    db.query("SELECT name FROM products WHERE prod_id=?", [productId], (err, res) => {
+                        if (err) {
+                            console.error("Select Product Error:", err);
+                            return;
+                        }
+                        if (res.length === 0) {
+                            ws.send(JSON.stringify({ event: "error", message: "Product not found" }));
+                            return;
+                        }
+                        const prodName = res[0].name;
+                        db.query("DELETE FROM products WHERE prod_id=?", [productId], (delErr) => {
+                            if (delErr) {
+                                console.error("Delete Product Error:", delErr);
+                                ws.send(JSON.stringify({ event: "error", message: "Failed to delete product" }));
+                                return;
+                            }
+                            console.log(`[ACTIVITY] Product "${prodName}" deleted`);
+                            broadcast(JSON.stringify({ event: "product_deleted", payload: { productId: productId, name: prodName } }));
+                            logActivity(0, "PRODUCT_DELETE", `Deleted product "${prodName}"`);
+                            broadcastLiveStats();
+                        });
+                    });
+                break;
+
+                case "create_category":
+                    const { name: categName, image: categImage } = data.payload;
+                    db.query("INSERT INTO categories (name, image_path) VALUES (?, ?)", [categName, categImage], (err, result) => {
+                        if (err) {
+                            console.error("Create Category Error:", err);
+                            ws.send(JSON.stringify({ event: "error", message: "Failed to create category" }));
+                            return;
+                        }
+                        const categId = result.insertId;
+                        console.log(`[ACTIVITY] Category "${categName}" created with ID ${categId}`);
+                        broadcast(JSON.stringify({ event: "category_created", payload: { categoryId: categId, name: categName } }));
+                        logActivity(0, "CATEGORY_CREATE", `Created category "${categName}"`);
+                    });
+                break;
+
+                case "update_category":
+                    const { categ_id, name: updCategName, image: updCategImage } = data.payload;
+                    db.query("UPDATE categories SET name=?, image_path=? WHERE categ_id=?", [updCategName, updCategImage, categ_id], (err) => {
+                        if (err) {
+                            console.error("Update Category Error:", err);
+                            ws.send(JSON.stringify({ event: "error", message: "Failed to update category" }));
+                            return;
+                        }
+                        console.log(`[ACTIVITY] Category "${updCategName}" updated`);
+                        broadcast(JSON.stringify({ event: "category_updated", payload: { categoryId: categ_id, name: updCategName } }));
+                        logActivity(0, "CATEGORY_UPDATE", `Updated category "${updCategName}"`);
+                    });
+                break; 
+
+                case "delete_category":
+                    const { categoryId } = data.payload;
+                    db.query("SELECT name FROM categories WHERE categ_id=?", [categoryId], (err, res) => {
+                        if (err) {
+                            console.error("Select Category Error:", err);
+                            return;
+                        }
+                        if (res.length === 0) {
+                            ws.send(JSON.stringify({ event: "error", message: "Category not found" }));
+                            return;
+                        }
+                        const categName = res[0].name;
+                        db.query("DELETE FROM categories WHERE categ_id=?", [categoryId], (delErr) => {
+                            if (delErr) {
+                                console.error("Delete Category Error:", delErr);
+                                ws.send(JSON.stringify({ event: "error", message: "Failed to delete category" }));
+                                return;
+                            }
+                            console.log(`[ACTIVITY] Category "${categName}" deleted`);
+                            broadcast(JSON.stringify({ event: "category_deleted", payload: { categoryId: categoryId, name: categName } }));
+                            logActivity(0, "CATEGORY_DELETE", `Deleted category "${categName}"`);
+                        });
+                    });
+                break;
+                case "update_staff_delivery":
+                    const { order_id, status } = data.payload;
+                    db.query("UPDATE orders SET status = ? WHERE order_id = ?", [status, order_id], (err) => {
+                        if (err) {
+                            console.error("Update Delivery Error:", err);
+                            ws.send(JSON.stringify({ event: "error", message: "Failed to update delivery status" }));
+                            return;
+                        }
+                        console.log(`[ACTIVITY] Order "${order_id}" status updated to "${status}"`);
+                        broadcast(JSON.stringify({ event: "order_updated", payload: { orderId: order_id, status: status } }));
+                        logActivity(0, "ORDER_UPDATE", `Updated order "${order_id}" status to "${status}"`);
+                    });
+                break;
+            }
+        });
     });
-});
+
 
 function broadcast(payload) { wss.clients.forEach(client => { if (client.readyState === WebSocket.OPEN) client.send(payload); }); }
 function broadcastTopItems() { broadcast(JSON.stringify({ event: "update_best_sellers", top_item_ids: getTopThree() })); }
