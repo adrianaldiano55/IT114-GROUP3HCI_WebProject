@@ -21,6 +21,9 @@ foreach ($items as $item) {
 
 $staffStmt = $pdo->query("SELECT user_id, username FROM users WHERE usertype = 'staff' ORDER BY username");
 $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
+function e($str) {
+    return htmlspecialchars((string)$str, ENT_QUOTES, 'UTF-8');
+}
 ?>
 
 <!DOCTYPE html>
@@ -338,9 +341,19 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
                 </button>
                 <ul class="dropdown-menu dropdown-menu-end border-0 shadow-lg mt-2 p-3" style="border-radius: 15px; min-width: 200px;">
                     <li class="px-2 mb-2"><small class="text-muted text-uppercase fw-bold">User Information</small></li>
-                    <li><span class="dropdown-item fw-bold text-primary">@<?= htmlspecialchars($_SESSION['username'] ?? 'User') ?></span></li>
+                    <li><span class="dropdown-item fw-bold text-primary"><?= e($_SESSION['username'] ?? 'User') ?>
                     <li><hr class="dropdown-divider"></li>
-                    <li><a class="dropdown-item text-danger fw-bold" href="logout.php">Logout</a></li>
+                    <li>
+                        <form method="POST" action="logout.php" class="m-0">
+                            <input type="hidden" name="csrf_token"
+                                value="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
+
+                            <button type="submit"
+                                class="dropdown-item text-danger fw-bold border-0 bg-transparent w-100 text-start">
+                                Logout
+                            </button>
+                        </form>
+                    </li>
                 </ul>
             </div>
         </div>
@@ -535,12 +548,34 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
         </div>
     </div>
 </div>
+
+<!-- CSRF TOKEN -->
+<script>
+const csrfToken = <?= json_encode($_SESSION['csrf_token']) ?>;
+</script>
+
 <script>
 let cart = {}; 
-const userid = "<?= $_SESSION['user_id'] ?>";
-const productsData = <?= json_encode($itemsByCategory) ?>;
+const userid = <?= json_encode($_SESSION['user_id']) ?>;
+const productsData = <?= json_encode(
+    $itemsByCategory,
+    JSON_HEX_TAG |
+    JSON_HEX_AMP |
+    JSON_HEX_APOS |
+    JSON_HEX_QUOT
+) ?>;
 let stockChart;
 let lastTopItemIds = []; 
+
+// SANITIZATION 
+function escapeHTML(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
 
 // --- INITIALIZE CHART ---
 function initStockChart() {
@@ -566,6 +601,10 @@ function initStockChart() {
     });
 }
 
+function isValidNumber(val) {
+    return typeof val === 'number' && !isNaN(val);
+}
+
 // --- WEBSOCKET CONNECTION ---
 const socket = new WebSocket("ws://localhost:3000?usertype=customer");
 
@@ -575,7 +614,16 @@ socket.onopen = function() {
 };
 
 socket.onmessage = function(event) {
-    const data = JSON.parse(event.data);
+    let data;
+
+    try {
+        data = JSON.parse(event.data);
+    } catch (e) {
+        console.error("Invalid WebSocket JSON", e);
+        return;
+    }
+
+    if (typeof data !== 'object' || !data.event) return;
 
     if (data.event === "initial_logs") {
         const feed = document.getElementById('activityFeed');
@@ -588,38 +636,55 @@ socket.onmessage = function(event) {
     }
 
     if (data.event === "activity_alert") {
-        // --- FIX: Always append the message to the feed regardless of prod_id ---
-        appendToFeed(data.message);
-        
-        // --- UPDATED STOCK LOGIC (Only runs if prod_id exists) ---
-        if (data.prod_id !== undefined) {
-            // 1. Update the local productsData variable so the UI knows the new stock
+
+        if (typeof data.message !== "string") return;
+        if (!Number.isFinite(Number(data.prod_id))) return;
+        if (!Number.isFinite(Number(data.new_stock))) return;
+
+        // Always escape before UI rendering
+        appendToFeed(escapeHTML(data.message));
+
+        if (data.prod_id !== undefined && data.new_stock !== undefined) {
+
+            const prodId = String(data.prod_id);
+            const newStock = Number(data.new_stock);
+
+            if (!isValidNumber(newStock)) return;
+
+            // Update local product cache
             Object.keys(productsData).forEach(catId => {
-                let product = productsData[catId].find(p => String(p.prod_id) === String(data.prod_id));
+                let product = productsData[catId].find(
+                    p => String(p.prod_id) === prodId
+                );
                 if (product) {
-                    product.stock = data.new_stock;
+                    product.stock = newStock;
                 }
             });
 
-            // 2. Refresh the product grid. 
             updateMultiFilters();
 
-            // 3. Update the Modal if it is currently open for this specific product
-            if (currentSelectedProduct && String(currentSelectedProduct.prod_id) === String(data.prod_id)) {
-                currentSelectedProduct.stock = data.new_stock; 
+            // Update modal if open for this product
+            if (
+                currentSelectedProduct &&
+                String(currentSelectedProduct.prod_id) === prodId
+            ) {
+                currentSelectedProduct.stock = newStock;
+
                 const stockCountEl = document.getElementById('stockCount');
                 if (stockCountEl) {
-                    stockCountEl.innerText = data.new_stock;
+                    stockCountEl.innerText = newStock;
                 }
-                if (currentQty > data.new_stock) {
-                    currentQty = Math.max(1, data.new_stock);
+
+                if (currentQty > newStock) {
+                    currentQty = Math.max(1, newStock);
                     document.getElementById('modalQty').innerText = currentQty;
                     calculateModalTotalPrice();
                 }
-                updateModalButtonStates(currentQty, data.new_stock);
-                
+
+                updateModalButtonStates(currentQty, newStock);
+
                 const buyBtn = document.getElementById('modalBuyNowBtn');
-                if (data.new_stock <= 0) {
+                if (newStock <= 0) {
                     buyBtn.classList.add('disabled', 'opacity-50');
                     buyBtn.onclick = null;
                 } else {
@@ -659,27 +724,51 @@ function appendToFeed(msg) {
     div.className = 'feed-item';
     div.style.fontSize = "0.85rem";
     div.style.marginBottom = "5px";
-    div.innerHTML = `<span>${msg}</span>`;
+    const span = document.createElement('span');
+    span.textContent = msg;
+    div.appendChild(span);
     feed.prepend(div);
     if (feed.childNodes.length > 5) feed.removeChild(feed.lastChild);
 }
 
 function applySoldOutBadgeRealTime(prodId) {
-    const cards = document.querySelectorAll('.product-display-card');
+
+    const cards = document.querySelectorAll(
+        `.product-display-card[data-product-id="${prodId}"]`
+    );
+
     cards.forEach(card => {
-        const onclickAttr = card.getAttribute('onclick');
-        if (onclickAttr && (onclickAttr.includes(`"prod_id":"${prodId}"`) || onclickAttr.includes(`"prod_id":${prodId}`))) {
-            if (!card.querySelector('.stock-ribbon')) {
-                const ribbon = document.createElement('div');
-                ribbon.className = 'stock-ribbon';
-                ribbon.innerText = 'SOLD OUT';
-                card.appendChild(ribbon);
-                card.removeAttribute('onclick'); 
-                card.style.opacity = "0.7";
-            }
+
+        if (!card.querySelector('.stock-ribbon')) {
+
+            const ribbon = document.createElement('div');
+
+            ribbon.className = 'stock-ribbon';
+
+            ribbon.innerText = 'SOLD OUT';
+
+            card.appendChild(ribbon);
         }
+
+        card.style.opacity = "0.7";
+
+        card.style.pointerEvents = "none";
     });
 }
+
+function safeImagePath(path) {
+    if (!path) return '';
+
+    if (
+        path.startsWith('images/') ||
+        path.startsWith('uploads/')
+    ) {
+        return escapeHTML(path);
+    }
+
+    return 'images/default.png';
+}
+
 
 function showAckToast(message) {
     const toastEl = document.getElementById('wsToast');
@@ -710,37 +799,93 @@ function updateMultiFilters() {
     const grid = document.getElementById('productGrid');
     const checkboxes = document.querySelectorAll('.cat-checkbox');
     const gallery = document.getElementById('productGallerySection');
+
     grid.innerHTML = ''; 
     let hasSelection = false;
 
     checkboxes.forEach(cb => {
         if (cb.checked) {
             hasSelection = true;
+
             const catId = cb.value;
             const catName = cb.getAttribute('data-name');
-            const items = productsData[catId] || [];
+            const items = productsData[catId] || []; // ✅ FIX #1
+
             if (items.length > 0) {
-                grid.innerHTML += `<div class="col-12 mt-4 mb-2"><h4 class="fw-bold text-dark border-bottom pb-2">${catName}</h4></div>`;
+                grid.innerHTML += `
+                    <div class="col-12 mt-4 mb-2">
+                        <h4 class="fw-bold text-dark border-bottom pb-2">
+                            ${escapeHTML(catName)}
+                        </h4>
+                    </div>
+                `;
+
                 items.forEach(item => {
                     const isSoldOut = parseInt(item.stock) <= 0;
-                    grid.innerHTML += `
-                        <div class="col-6 col-md-6 col-lg-4">
-                            <div class="product-display-card position-relative" style="${isSoldOut ? 'opacity: 0.7;' : ''}" onclick="${isSoldOut ? '' : `openActionModal(${JSON.stringify(item).replace(/"/g, '&quot;')})`}">
-                                <img src="${item.image_path}">
-                                ${parseFloat(item.discount) > 0 ? `<div class="discount-ribbon" style="position:absolute; top:10px; left:10px; background:#ef4444; color:white; padding:2px 8px; border-radius:5px; font-size:0.7rem;">-${item.discount}%</div>` : ''}
-                                ${isSoldOut ? '<div class="stock-ribbon">SOLD OUT</div>' : ''}
-                                <div class="product-info-overlay">
-                                    <h6 class="mb-0 text-truncate">${item.name}</h6>
-                                    <span class="fw-bold text-warning">₱${parseFloat(item.price).toFixed(2)}</span>
+                    const safeImg = safeImagePath(item.image_path);
+
+                    const wrapper = document.createElement("div");
+                    wrapper.className = "col-6 col-md-6 col-lg-4";
+
+                    wrapper.innerHTML = `
+                        <div class="product-display-card"
+                            data-product-id="${item.prod_id}">
+                           
+
+                            <img src="${safeImg}" alt="${escapeHTML(item.name)}">
+
+                            ${parseFloat(item.discount) > 0 ? `
+                                <div class="discount-ribbon"
+                                    style="position:absolute;top:10px;left:10px;background:#ef4444;color:white;padding:2px 8px;border-radius:5px;font-size:0.7rem;">
+                                    -${item.discount}%
                                 </div>
+                            ` : ''}
+
+                            ${isSoldOut ? '<div class="stock-ribbon">SOLD OUT</div>' : ''}
+
+                            <div class="product-info-overlay">
+                                <h6 class="mb-0 text-truncate">${escapeHTML(item.name)}</h6>
+                                <span class="fw-bold text-warning">
+                                    ₱${parseFloat(item.price).toFixed(2)}
+                                </span>
                             </div>
-                        </div>`;
+                        </div>
+                    `;
+
+                    grid.appendChild(wrapper);
                 });
             }
         }
     });
-    hasSelection ? gallery.classList.remove('d-none') : gallery.classList.add('d-none');
-    if(lastTopItemIds.length > 0) renderBestSellerBadges(lastTopItemIds);
+
+    if (hasSelection) {
+        gallery.classList.remove('d-none');
+    } else {
+        gallery.classList.add('d-none');
+    }
+
+// attach click events
+document.querySelectorAll('.product-display-card').forEach(card => {
+    if (card.querySelector('.stock-ribbon')) return;
+
+    card.addEventListener('click', () => {
+        const id = card.dataset.productId;
+        if (!id) return;
+
+        let product = null;
+
+        Object.values(productsData).forEach(cat => {
+            const found = cat.find(p => String(p.prod_id) === id);
+            if (found) product = found;
+        });
+
+        if (!product) return;
+
+        openActionModal(product);
+    });
+});
+
+if (lastTopItemIds.length > 0) renderBestSellerBadges(lastTopItemIds);
 }
 
 function displayProducts(catId, catName) {
@@ -957,7 +1102,15 @@ function calculateCartTotals() {
 
 function confirmDelivery() {
     const duetime = document.getElementById("deliveryDueTime").value;
-    const address = document.getElementById("deliveryAddress").value;
+    const address = document
+    .getElementById("deliveryAddress")
+    .value
+    .trim();
+
+    if (address.length < 5 || address.length > 255) {
+        alert("Invalid address");
+        return;
+    }
     if(!duetime || !address) return alert("Fill all details.");
 
     const checkedItems = [];
@@ -974,7 +1127,8 @@ function confirmDelivery() {
     if (checkedItems.length === 0) return alert("No items selected.");
 
     socket.send(JSON.stringify({ 
-        event: "create_order", 
+        event: "create_order",
+        csrf_token: csrfToken,
         customer_id: userid, 
         due_time: duetime, 
         delivery_address: address, 
@@ -989,25 +1143,41 @@ function confirmDelivery() {
 }
 
 function renderBestSellerBadges(topIds) {
-    document.querySelectorAll('.best-seller-badge').forEach(el => el.remove());
+
+    document
+        .querySelectorAll('.best-seller-badge')
+        .forEach(el => el.remove());
+
     topIds.forEach((id, index) => {
-        const card = document.querySelector(`[onclick*="openActionModal"][onclick*="${id}"]`);
-        if (card) {
-            const badge = document.createElement('div');
-            badge.className = 'best-seller-badge';
-            badge.innerHTML = (index === 0) ? '🏆 #1' : '🔥 Top';
-            badge.style.position = 'absolute';
-            badge.style.top = '10px';
-            badge.style.right = '10px';
-            badge.style.backgroundColor = (index === 0) ? '#ffc107' : '#fd7e14';
-            badge.style.color = '#000';
-            badge.style.padding = '3px 8px';
-            badge.style.borderRadius = '5px';
-            badge.style.fontSize = '0.65rem';
-            badge.style.fontWeight = 'bold';
-            badge.style.zIndex = '10';
-            card.appendChild(badge);
-        }
+
+        const card = document.querySelector(
+            `.product-display-card[data-product-id="${id}"]`
+        );
+
+        if (!card) return;
+
+        const badge = document.createElement('div');
+
+        badge.className = 'best-seller-badge';
+
+        badge.innerHTML = (index === 0)
+            ? '🏆 #1'
+            : '🔥 Top';
+
+        badge.style.position = 'absolute';
+        badge.style.top = '10px';
+        badge.style.right = '10px';
+        badge.style.backgroundColor =
+            (index === 0) ? '#ffc107' : '#fd7e14';
+
+        badge.style.color = '#000';
+        badge.style.padding = '3px 8px';
+        badge.style.borderRadius = '5px';
+        badge.style.fontSize = '0.65rem';
+        badge.style.fontWeight = 'bold';
+        badge.style.zIndex = '10';
+
+        card.appendChild(badge);
     });
 }
 

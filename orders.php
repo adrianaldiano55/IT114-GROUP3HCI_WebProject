@@ -38,10 +38,10 @@ if (!empty($orders)) {
             if ($item['order_id'] == $order['order_id']) {
                 $pId = $item['product']; 
                 $prodName = $products[$pId] ?? 'Unknown Item';
-                $summary[] = $prodName . ' x ' . $item['quantity'];
+                $summary[] = $prodName . ' x ' . (int)$item['quantity'];
             }
         }
-        $order['product_summary'] = !empty($summary) ? implode('<br>', $summary) : 'No items found';
+        $order['product_summary'] = implode("\n", $summary);
     }
 }
 
@@ -52,6 +52,12 @@ $staffStmt = $pdo->query("
     WHERE usertype = 'staff'
 ");
 $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
+
+
+function e($str) {
+    return htmlspecialchars($str, ENT_QUOTES, 'UTF-8');
+}
+
 ?>
 
 <!DOCTYPE html>
@@ -195,9 +201,19 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
                 </button>
                 <ul class="dropdown-menu dropdown-menu-end border-0 shadow-lg mt-2 p-3" style="border-radius: 15px; min-width: 200px;">
                     <li class="px-2 mb-2"><small class="text-muted text-uppercase fw-bold">User Information</small></li>
-                    <li><span class="dropdown-item fw-bold text-primary">@<?= htmlspecialchars($_SESSION['username'] ?? 'User') ?></span></li>
+                    <li><span class="dropdown-item fw-bold text-primary">@<?= e($_SESSION['username'] ?? 'User') ?>
                     <li><hr class="dropdown-divider"></li>
-                    <li><a class="dropdown-item text-danger fw-bold" href="logout.php">Logout</a></li>
+                    <li>
+                        <form method="POST" action="logout.php" class="m-0">
+                            <input type="hidden" name="csrf_token"
+                                value="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
+
+                            <button type="submit"
+                                class="dropdown-item text-danger fw-bold border-0 bg-transparent w-100 text-start">
+                                Logout
+                            </button>
+                        </form>
+                    </li>
                 </ul>
             </div>
         </div>
@@ -247,28 +263,30 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
                             $badgeClass = 'status-' . strtolower($rawStatus);
                             $summary = $o['product_summary'] ?? 'No items';
                             $due = (!empty($o['due_at']) && $o['due_at'] != '00:00:00')? date('h:i A', strtotime($o['due_at'])): 'Not set';
-                            $addr = (!empty($o['address']) && $o['address'] != 'NULL') ? htmlspecialchars($o['address']) : 'Store Pickup';
+                            $addr = (!empty($o['address']) && $o['address'] !== 'NULL')
+                            ? $o['address']
+                            : 'Store Pickup';
                         ?> 
                             <tr data-order-id="<?= (int)$o['order_id'] ?>" data-status="<?= $rawStatus ?>">
-                                <td class="fw-bold">#<?= $displayStr ?></td>
-                                <td class="fw-bold text-danger">₱<?= number_format((float)($o['price_total'] ?? 0), 2) ?></td>
-                                <td class="small"><?= $summary ?></td> 
-                                <td><span class="status-badge <?= $badgeClass ?>"><?= $rawStatus ?></span></td>
-                                <td class="small text-muted"><?= date('M d, Y h:i A', strtotime($o['created_at'])) ?></td>
+                                <td class="fw-bold">#<?= e($displayStr)?></td>
+                                <td class="fw-bold text-danger">₱<?= e(number_format((float)($o['price_total'] ?? 0), 2)) ?></td>
+                                <td class="small"><?= e($summary) ?></td> 
+                                <td><span class="status-badge <?= $badgeClass ?>"><?= e($rawStatus) ?></span></td>
+                                <td class="small text-muted"><?= e(date('M d, Y h:i A', strtotime($o['created_at']))) ?></td>
                                 <td class="text-end">
                                     <div class="d-flex justify-content-end gap-2">
                                         <?php if ($rawStatus === 'PROCESSING' || $rawStatus === 'COMPLETED'): ?>
                                             <span class="fw-bold text-success px-2" style="cursor: default;"></span>
                                         <?php endif; ?>
-                                        <button class="btn btn-sm btn-outline-secondary fw-bold px-3 rounded-pill" 
-                                            onclick="viewOrderDetails(
-                                                '<?= $displayStr ?>',
-                                                '<?= addslashes($summary) ?>',
-                                                '<?= $due ?>',
-                                                '<?= addslashes($addr) ?>',
-                                                '<?= number_format((float)$o['price_total'], 2) ?>'
-                                            )">
-                                            Details
+                                        <button
+                                        class="btn btn-sm btn-outline-secondary"
+                                        data-id="<?= (int)$o['order_id'] ?>"
+                                        data-summary="<?= e($summary) ?>"
+                                        data-due="<?= e($due) ?>"
+                                        data-addr="<?= e($addr) ?>"
+                                        data-total="<?= e(number_format((float)$o['price_total'], 2)) ?>"
+                                        onclick="viewOrderDetailsFromEl(this)">
+                                        Details
                                         </button>
                                         <button class="btn btn-sm btn-outline-primary px-3 rounded-pill"
                                             onclick="openUpdateModal(
@@ -370,13 +388,17 @@ $staffList = $staffStmt->fetchAll(PDO::FETCH_ASSOC);
     </div>
 </div>
 
+<!-- CSRF TOKEN -->
+<script>
+const csrfToken = <?= json_encode($_SESSION['csrf_token']) ?>;
+</script>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let cart = {}; 
 const userid = "<?= $_SESSION['user_id'] ?>";
 
-const socket = new WebSocket("ws://localhost:3000?usertype=customer");
-
+const socket = new WebSocket("wss://faydss.com:3000")
 socket.onopen = function() {
     socket.send(JSON.stringify({ event: "client_connected", userid: userid }));
 };
@@ -410,11 +432,17 @@ socket.onmessage = function(event) {
 
 
 // =========================
-// VIEW DETAILS (UNCHANGED)
+// VIEW DETAILS (SANITIZED)
 // =========================
-function viewOrderDetails(id, summary, due, addr, total) {
+function viewOrderDetailsFromEl(el) {
+    const id = el.dataset.id;
+    const summary = JSON.parse(row.dataset.summary);
+    const due = el.dataset.due;
+    const addr = el.dataset.addr;
+    const total = el.dataset.total;
+
     document.getElementById('detId').innerText = id;
-    document.getElementById('detSummary').innerHTML = summary; 
+    document.getElementById('detSummary').innerText = summary;
     document.getElementById('detDue').innerText = due;
     document.getElementById('detAddr').innerText = addr;
     document.getElementById('detTotal').innerText = total;
@@ -436,6 +464,7 @@ function deleteOrder(orderId) {
 
     socket.send(JSON.stringify({
         type: "delete_order",
+        csrf_token: csrfToken,
         payload: { orderId }
     }));
 }
@@ -484,6 +513,7 @@ function updateOrderDelivery(orderId, dueTime, address) {
 
     socket.send(JSON.stringify({
         type: "update_order",
+        csrf_token: csrfToken,
         payload: {
             orderId,
             dueTime,
@@ -510,6 +540,47 @@ function convertToTimeInput(timeStr) {
     }
 
     return `${hours.toString().padStart(2, '0')}:${minutes}`;
+}
+
+// =========================
+// FILTER LOGIC
+// =========================
+let currentStatusFilter = "ALL";
+
+function setStatusFilter(status) {
+    currentStatusFilter = status;
+
+    // Update active button UI
+    document.querySelectorAll('.status-filter-btn').forEach(btn => {
+        btn.classList.remove('active');
+    });
+
+    document.querySelector(`[data-status="${status}"]`).classList.add('active');
+
+    filterOrders();
+}
+
+function filterOrders() {
+    const rows = document.querySelectorAll('#ordersTbody tr');
+    const searchValue = document.getElementById('orderSearch').value.toLowerCase();
+
+    rows.forEach(row => {
+        const rowStatus = row.getAttribute('data-status');
+        const orderText = row.innerText.toLowerCase();
+
+        const matchesStatus =
+            currentStatusFilter === 'ALL' ||
+            rowStatus === currentStatusFilter;
+
+        const matchesSearch =
+            orderText.includes(searchValue);
+
+        if (matchesStatus && matchesSearch) {
+            row.style.display = '';
+        } else {
+            row.style.display = 'none';
+        }
+    });
 }
 </script>
 </body>

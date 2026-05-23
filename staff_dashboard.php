@@ -2,13 +2,42 @@
 require_once 'auth_terminal.php';
 require_once 'config.php';
 
+// check if user is logged in
+if (!isset($_SESSION['user_id'])) {
+    header("Location: login.php");
+    exit();
+}
+
+// check role
+if (!isset($_SESSION['usertype']) || $_SESSION['usertype'] !== 'staff') {
+    http_response_code(403);
+    echo "403 Forbidden - Staff only";
+    exit();
+}
+
+$catStmt = $pdo->query("SELECT categ_id, name, image_path FROM categories ORDER BY name");
+$categories = $catStmt->fetchAll(PDO::FETCH_ASSOC);
+
+$itemStmt = $pdo->query("
+    SELECT m.prod_id, m.name, m.price, m.stock, m.discount, m.image_path,
+        c.name AS category_name, c.categ_id AS category
+    FROM products m
+    LEFT JOIN categories c ON c.categ_id = m.category
+    ORDER BY c.name, m.name
+");
+$items = $itemStmt->fetchAll(PDO::FETCH_ASSOC);
+
+$itemsByCategory = [];
+foreach ($items as $item) {
+    $itemsByCategory[$item['category']][] = $item;
+}
 // Fetch orders
 $user_id = $_SESSION['user_id'];
 
 // 1. Fetch products as a Key-Pair (ID => Name)
 $productStmt = $pdo->query("SELECT prod_id, name FROM products");
 $products = $productStmt->fetchAll(PDO::FETCH_KEY_PAIR); 
-$status = $_GET['status'] ?? 'PROCESSING';
+$status = htmlspecialchars($_GET['status'] ?? 'PROCESSING', ENT_QUOTES, 'UTF-8');
 
  $ordStmt = $pdo->prepare("
 SELECT *
@@ -34,15 +63,31 @@ if (!empty($orders)) {
  // 3. Map items to orders
 foreach ($orders as &$order) {
     $summary = [];
+
     foreach ($order_items as $item) {
         if ($item['order_id'] == $order['order_id']) {
-             $pId = $item['product']; 
-             $prodName = $products[$pId] ?? 'Unknown Item';
-             $summary[] = $prodName . ' x ' . $item['quantity'];
+
+            $pId = $item['product'];
+            $prodName = $products[$pId] ?? 'Unknown Item';
+
+            $summary[] = [
+                'name' => $prodName,
+                'qty'  => (int)$item['quantity']
+            ];
         }
     }
-        $order['product_summary'] = !empty($summary) ? implode('<br>', $summary) : 'No items found';
-    }
+
+    $order['product_summary'] = $summary;
+}
+unset($order);
+}
+
+function e_html($str) {
+    return htmlspecialchars((string)$str, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+function e_js($str) {
+    return json_encode((string)$str, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 }
 
 ?>
@@ -55,8 +100,9 @@ foreach ($orders as &$order) {
     <title>Staff Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-<style>
+<style>  
     body {
         font-family: 'Plus Jakarta Sans', sans-serif;
         margin: 0;
@@ -158,6 +204,43 @@ foreach ($orders as &$order) {
         border: 1px solid #ddd;
         padding: 8px 15px;
     }
+        #activityFeed {
+        height: 100px;
+        overflow-y: auto;
+        font-size: 0.8rem;
+    }
+
+    .feed-item {
+        padding: 5px 0;
+        border-bottom: 1px solid #f8f9fa;
+        animation: fadeIn 0.5s ease;
+    }
+
+    @keyframes fadeIn {
+        from { opacity: 0; }
+    to { opacity: 1; }
+    }
+
+    /* Analytics Specific Styles */
+    .insight-card {
+        background: #fff;
+        border-radius: 15px;
+        padding: 15px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        height: 100%;
+        border: 1px solid #f0f0f0;
+    }
+    #activityFeed {
+        height: 100px;
+        overflow-y: auto;
+        font-size: 0.8rem;
+    }
+    .feed-item {
+        padding: 5px 0;
+        border-bottom: 1px solid #f8f9fa;
+        animation: fadeIn 0.5s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 </style>
 </head>
 <body>
@@ -174,9 +257,19 @@ foreach ($orders as &$order) {
                 </button>
                 <ul class="dropdown-menu dropdown-menu-end border-0 shadow-lg mt-2 p-3" style="border-radius: 15px; min-width: 200px;">
                     <li class="px-2 mb-2"><small class="text-muted text-uppercase fw-bold">User Information</small></li>
-                    <li><span class="dropdown-item fw-bold text-primary">@<?= htmlspecialchars($_SESSION['username'] ?? 'User') ?></span></li>
+                    <li><span class="dropdown-item fw-bold text-primary">@<?= e_html($_SESSION['username'] ?? 'User') ?></span></li>
                     <li><hr class="dropdown-divider"></li>
-                    <li><a class="dropdown-item text-danger fw-bold" href="logout.php">Logout</a></li>
+                    <li>
+                        <form method="POST" action="logout.php" class="m-0">
+                            <input type="hidden" name="csrf_token"
+                                value="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
+
+                            <button type="submit"
+                                class="dropdown-item text-danger fw-bold border-0 bg-transparent w-100 text-start">
+                                Logout
+                            </button>
+                        </form>
+                    </li>
                 </ul>
             </div>
         </div>
@@ -184,6 +277,29 @@ foreach ($orders as &$order) {
 </nav>
 
 <div class="container mt-4">
+    <!-- Live Sync, Activity Feed, and Stock Tracking Panel Area -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <div class="insight-card text-center">
+                <h6 class="text-muted fw-bold small">TOTAL ORDERS</h6>
+                <h2 class="fw-bold text-primary mb-0" id="liveOrderCount">0</h2>
+                <small class="text-success small">● Live Sync</small>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="insight-card">
+                <h6 class="text-muted fw-bold small mb-1">ACTIVITY FEED</h6>
+                <div id="activityFeed"><div class="text-muted small">No recent activity...</div></div>
+            </div>
+        </div>
+        <div class="col-md-5">
+            <div class="insight-card">
+                <h6 class="text-muted fw-bold small mb-1">STOCK PER CATEGORY</h6>
+                <canvas id="stockChart" style="max-height: 100px;"></canvas>
+            </div>
+        </div>
+    </div>
+
     <div class="orders-container">
         <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center mb-4">
             <div>
@@ -219,45 +335,54 @@ foreach ($orders as &$order) {
                             $displayStr = str_pad($o['order_id'], 4, '0', STR_PAD_LEFT);
                             $rawStatus = strtoupper(trim($o['status'] ?? 'PENDING'));
                             $badgeClass = 'status-' . strtolower($rawStatus);
-                            $summary = $o['product_summary'] ?? 'No items';
-                            $due = (!empty($o['due_at']) && $o['due_at'] != '00:00:00')? date('h:i A', strtotime($o['due_at'])): 'Not set';
-                            $addr = (!empty($o['address']) && $o['address'] != 'NULL') ? htmlspecialchars($o['address']) : 'Store Pickup';
+                            $summary = $o['product_summary'] ?? [];
+                            $dueRaw = $o['due_at'] ?? '';
+                            $due = (!empty($dueRaw) && $dueRaw !== '00:00:00' && $dueRaw !== '0000-00-00 00:00:00')
+                                ? date('h:i A', strtotime($dueRaw))
+                                : 'Not set';
+                            $addr = (!empty($o['address']) && $o['address'] !== 'NULL') ? e_html($o['address']) : 'Store Pickup';
                         ?> 
-                            <tr data-order-id="<?= (int)$o['order_id'] ?>" data-status="<?= $rawStatus ?>">
+                            <tr
+                                data-order-id="<?= (int)$o['order_id'] ?>"
+                                data-display="<?= htmlspecialchars($displayStr, ENT_QUOTES, 'UTF-8') ?>"
+                                data-summary="<?= e_html(implode("\n", array_map(fn($i) => $i['name'].' x '.$i['qty'], $o['product_summary'] ?? []))) ?>"
+                                data-due="<?= e_html($due) ?>"
+                                data-addr="<?= e_html($addr) ?>"
+                                data-total="<?= e_html(number_format((float)$o['price_total'], 2)) ?>"
+                                data-status="<?= e_html($rawStatus) ?>"
+                            >
                                 <td class="fw-bold">#<?= $displayStr ?></td>
                                 <td class="fw-bold text-danger">₱<?= number_format((float)($o['price_total'] ?? 0), 2) ?></td>
-                                <td class="small"><?= $summary ?></td> 
-                                <td><span class="status-badge <?= $badgeClass ?>"><?= $rawStatus ?></span></td>
+                                <td class="small">
+                                <?php
+                                $lines = array_map(function($i){
+                                    return e_html($i['name']) . ' x ' . (int)$i['qty'];
+                                }, $o['product_summary'] ?? []);
+
+                                echo nl2br(implode("\n", $lines));
+                                ?>
+                                </td>
+                                <td>
+                                    <span class="status-badge <?= $badgeClass ?>">
+                                        <?= htmlspecialchars($rawStatus) ?>
+                                    </span>
+                                </td>
                                 <td class="small text-muted"><?= date('M d, Y h:i A', strtotime($o['created_at'])) ?></td>
                                 <td class="text-end">
                                     <div class="d-flex justify-content-end gap-2">
-                                        <button class="btn btn-sm btn-outline-secondary fw-bold px-3 rounded-pill" 
-                                            onclick="viewOrderDetails(
-                                                '<?= $displayStr ?>',
-                                                '<?= addslashes($summary) ?>',
-                                                '<?= $due ?>',
-                                                '<?= addslashes($addr) ?>',
-                                                '<?= number_format((float)$o['price_total'], 2) ?>'
-                                            )">
-                                            Details
-                                        </button>
+                                    <button class="btn btn-sm btn-outline-secondary"
+                                        onclick="viewOrderDetailsFromRow(this.closest('tr'))">
+                                        Details
+                                    </button>
                                         <?php if ($rawStatus === 'PROCESSING'): ?>
                                             <button class="btn btn-sm btn-outline-primary px-3 rounded-pill"
-                                                onclick="openUpdateModal(
-                                                    <?= (int)$o['order_id'] ?>,
-                                                    '<?= $due ?>',
-                                                    '<?= addslashes($addr) ?>'
-                                                )">
+                                                onclick="openUpdateModalFromRow(this.closest('tr'))">
                                                 Accept
                                             </button>
                                         <?php endif; ?>
                                         <?php if ($rawStatus === 'PENDING'): ?>
                                             <button class="btn btn-sm btn-outline-primary px-3 rounded-pill"
-                                                onclick="openUpdateModal(
-                                                    <?= (int)$o['order_id'] ?>,
-                                                    '<?= $due ?>',
-                                                    '<?= addslashes($addr) ?>'
-                                                )">
+                                                onclick="openUpdateModalFromRow(this.closest('tr'))">
                                                 Complete
                                             </button>
                                         <?php endif; ?>
@@ -336,12 +461,53 @@ foreach ($orders as &$order) {
     </div>
 </div>
 
+<!-- CSRF TOKEN -->
+<script>
+const csrfToken = <?= json_encode($_SESSION['csrf_token']) ?>;
+</script>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let cart = {}; 
 const userid = "<?= $_SESSION['user_id'] ?>";
+let stockChart;
+
+const categoryNames = <?= json_encode(
+    array_column($categories, 'name', 'categ_id'),
+    JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+) ?>;
+
+// --- INITIALIZE CHART ---
+function initStockChart() {
+    const ctx = document.getElementById('stockChart').getContext('2d');
+    stockChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: [], 
+            datasets: [{
+                label: 'Qty',
+                data: [],
+                backgroundColor: '#ff6600',
+                borderRadius: 4
+            }]
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: { x: { display: false }, y: { ticks: { font: { size: 9 } }, grid: { display: false } } }
+        }
+    });
+}
 
 const socket = new WebSocket("ws://localhost:3000?usertype=staff");
+
+
+const categoryMap = <?= json_encode(
+    array_column($categories, 'name', 'categ_id'),
+    JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+) ?>;
 
 socket.onopen = function() {
     socket.send(JSON.stringify({ event: "client_connected", userid: userid }));
@@ -354,6 +520,38 @@ socket.onmessage = function(event) {
     const data = JSON.parse(event.data);
 
     console.log("WS Message:", data);
+
+    // Dynamic extraction logic for dashboard panels
+    if (data.event === "initial_logs") {
+        const feed = document.getElementById('activityFeed');
+        if (feed) {
+            feed.innerHTML = ''; 
+            data.logs.forEach(log => appendToFeed(log.message));
+        }
+    }
+
+    if (data.event === "live_stats") {
+        const liveCounter = document.getElementById('liveOrderCount');
+        if (liveCounter) {
+            liveCounter.innerText = data.total_orders;
+        }
+    }
+
+    if (data.event === "activity_alert") {
+        appendToFeed(data.message);
+    }
+
+    if (data.event === "stock_update" && stockChart) {
+
+        const labels = Object.keys(data.chartData).map(id => {
+            return categoryNames[id] || `Cat ${id}`;
+        });
+
+        stockChart.data.labels = labels;
+        stockChart.data.datasets[0].data = Object.values(data.chartData);
+
+        stockChart.update('none');
+    }
 
     const refreshEvents = [
         "order_updated",
@@ -372,6 +570,27 @@ socket.onmessage = function(event) {
         location.reload();
     }
 };
+
+function appendToFeed(msg) {
+    const feed = document.getElementById('activityFeed');
+    if (!feed) return;
+
+    const div = document.createElement('div');
+    div.className = 'feed-item';
+    div.style.fontSize = "0.85rem";
+    div.style.marginBottom = "5px";
+
+    const span = document.createElement('span');
+    span.textContent = msg;
+
+    div.appendChild(span);
+
+    feed.prepend(div);
+
+    if (feed.childNodes.length > 5) {
+        feed.removeChild(feed.lastChild);
+    }
+}
 // =========================
 // SET TABLE STATUS (NEW)
 // =========================
@@ -381,28 +600,42 @@ function setStatusFilter(status) {
 
 
 // =========================
-// VIEW DETAILS (UNCHANGED)
+// VIEW ROW DETAILS (CHANGED)
 // =========================
-function viewOrderDetails(id, summary, due, addr, total) {
+function viewOrderDetailsFromRow(row) {
+    const id = row.dataset.display || '';
+    const summary = row.dataset.summary || 'No items';
+    const due = row.dataset.due || 'Not set';
+    const addr = row.dataset.addr || 'Store Pickup';
+    const total = row.dataset.total || '0.00';
+
+    const modal = document.getElementById('orderDetailsModal');
+
     document.getElementById('detId').innerText = id;
-    document.getElementById('detSummary').innerHTML = summary; 
+    document.getElementById('detSummary').innerText = summary;
     document.getElementById('detDue').innerText = due;
     document.getElementById('detAddr').innerText = addr;
     document.getElementById('detTotal').innerText = total;
-    new bootstrap.Modal(document.getElementById('orderDetailsModal')).show();
-};
+
+    const bsModal = bootstrap.Modal.getOrCreateInstance(modal);
+    bsModal.show();
+}
 
 // =========================
-// OPEN UPDATE MODAL
+// OPEN MODAL (CHANGED)
 // =========================
-function openUpdateModal(orderId, due, address) {
+function openUpdateModalFromRow(row) {
+    const orderId = row.dataset.orderId;
+    const due = row.dataset.due;
+    const addr = row.dataset.addr;
+
     document.getElementById("updateOrderId").value = orderId;
 
     document.getElementById("deliveryDueTime").innerText = due;
-    document.getElementById("deliveryAddress").innerText = address;
+    document.getElementById("deliveryAddress").innerText = addr;
 
     new bootstrap.Modal(document.getElementById('deliveryModal')).show();
-};
+}
 
 
 // =========================
@@ -437,6 +670,7 @@ function updateOrderDelivery(orderId, orderstatus) {
 
     socket.send(JSON.stringify({
         type: "update_staff_delivery",
+        csrf_token: csrfToken,
         payload: {
             order_id: orderId,
             status: orderstatus
@@ -463,6 +697,9 @@ function convertToTimeInput(timeStr) {
 
     return `${hours.toString().padStart(2, '0')}:${minutes}`;
 };
+
+// Initialize stock chart component on ready
+window.addEventListener('DOMContentLoaded', initStockChart);
 </script>
 </body>
 </html>

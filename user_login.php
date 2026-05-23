@@ -17,8 +17,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_SESSION['password'] = $users['password'];
         $_SESSION['usertype'] = $users['usertype'];
         $_SESSION['username'] = $users['username'];
-        $_SESSION['email'] = $users['email'];           
-        
+        $_SESSION['email'] = $users['email'];
+        $_SESSION['user'] = [
+            'id' => $users['user_id'],
+            'role' => $users['usertype'],
+            'username' => $users['username'],
+            'email' => $users['email']
+        ];           
+        $stmt = $pdo->prepare("UPDATE users SET login_at = NOW() WHERE user_id = ?"); 
+        $stmt->execute([$_SESSION['user_id']]);
+
+        $stmt = $pdo->prepare("
+            INSERT INTO audit_logs (user_id, action, details, created_at)
+            VALUES (?, 'LOGIN', ?, NOW())
+        ");
+
+        $stmt->execute([
+            $users['user_id'],
+            "User {$users['username']} logged in as {$users['usertype']}"
+        ]);
         // Redirects user based on usertype
         switch ($users['usertype']) {
             case 'customer':

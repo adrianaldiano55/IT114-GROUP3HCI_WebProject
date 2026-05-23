@@ -1,5 +1,7 @@
 const WebSocket = require('ws');
 const mysql = require('mysql2');
+const fs = require('fs');
+const PHPUnserialize = require('php-unserialize');
 
 const db = mysql.createConnection({
     host: 'localhost',
@@ -8,6 +10,27 @@ const db = mysql.createConnection({
     database: 'faydss'
 });
 
+// ROLE BASED PERMISSIONS  
+const ROLE_PERMISSIONS = {
+    customer: [
+    "menu_click",
+    "create_order",
+    "client_connected",
+    "update_order"
+    ],
+
+    staff: [
+    "menu_click",
+    "client_connected",
+    "update_staff_delivery",
+    "update_order"
+    ],
+
+    admin: [
+        "*"
+    ]
+};
+
 let itemClicks = {};
 let lastCategoryCount = 0; 
 let lastUpdate = ""; 
@@ -15,9 +38,94 @@ let previousCategories = [];
 let previousStockMap = {}; 
 let lastStatusMap = {}; // Tracks order status changes
 
+// ROLE PERMISSIONS
+function hasPermission(ws, action) {
+    const role = ws.user?.role || "customer";
+    const allowed = ROLE_PERMISSIONS[role] || [];
+
+    return allowed.includes("*") || allowed.includes(action);
+}
+
+// CODE SANITIZATION  
+function sanitizeInput(input) {
+    if (typeof input !== 'string') return input;
+
+    return input
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// CSRF PROTECTION
+function validateCSRF(ws, data) {
+
+    // Require token
+    if (!data.csrf_token) {
+        ws.send(JSON.stringify({
+            event: "security_error",
+            message: "Missing CSRF token"
+        }));
+        return false;
+    }
+
+    // Require session cookie
+    if (!ws.sessionId) {
+        ws.send(JSON.stringify({
+            event: "security_error",
+            message: "Missing session"
+        }));
+        return false;
+    }
+
+    try {
+
+        // Read PHP session file
+        const sessionPath =
+            `C:/xampp/tmp/sess_${ws.sessionId}`;
+
+        if (!fs.existsSync(sessionPath)) {
+            return false;
+        }
+
+        const raw = fs.readFileSync(sessionPath, 'utf8');
+        const session = PHPUnserialize.unserializeSession(raw);
+
+        ws.user = session.user || { id: null, role: "customer" };
+
+        // Compare token
+        if (
+            !session.csrf_token ||
+            session.csrf_token !== data.csrf_token
+        ) {
+
+            ws.send(JSON.stringify({
+                event: "security_error",
+                message: "CSRF validation failed"
+            }));
+
+            return false;
+        }
+
+        return true;
+
+    } catch (err) {
+
+        console.error("CSRF Validation Error:", err);
+
+        ws.send(JSON.stringify({
+            event: "security_error",
+            message: "Security validation failed"
+        }));
+
+        return false;
+    }
+}
+
 function logActivity(userId, action, details) {
     const query = "INSERT INTO audit_logs (user_id, action, details, created_at) VALUES (?, ?, ?, NOW())";
-    db.query(query, [userId, action, details], (err) => {
+    db.execute(query, [userId, action, details], (err) => {
         if (err) console.error("Audit Log Error:", err);
     });
 }
@@ -71,7 +179,7 @@ setInterval(() => {
         results.forEach(product => {
             const id = product.prod_id;
             const currentStock = parseInt(product.stock);
-            const productName = product.name;
+            const productName = sanitizeInput(product.name);
 
             if (previousStockMap[id] !== undefined && previousStockMap[id] !== currentStock) {
                 let message = (currentStock === 0) ? `${productName} is now SOLD OUT!` : `Stock updated for ${productName}: ${currentStock} remaining.`;
@@ -85,7 +193,7 @@ setInterval(() => {
                     new_stock: currentStock 
                 }));
                 
-                logActivity(0, "SYSTEM", message);
+                logActivity(ws.user.id, "SYSTEM", message);
                 broadcastLiveStats(); 
             }
             previousStockMap[id] = currentStock;
@@ -117,7 +225,7 @@ setInterval(() => {
                         event: "activity_alert", 
                         message: statusMsg 
                     }));
-                    logActivity(0, "SYSTEM", statusMsg);
+                    logActivity(ws.user.id, "SYSTEM", statusMsg);
                 }
             }
             lastStatusMap[id] = currentStatus;
@@ -128,10 +236,44 @@ setInterval(() => {
 const wss = new WebSocket.Server({ port: 3000 });
 console.log(">> [SYSTEM] WebSocket Server Running on Port 3000");
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+    const cookies = req.headers.cookie || '';
+    const match = cookies.match(/PHPSESSID=([^;]+)/);
+
+    if (match) {
+        ws.sessionId = match[1];
+    }
+
+    // Load session immediately
+    try {
+        if (ws.sessionId) {
+            const sessionPath = `C:/xampp/tmp/sess_${ws.sessionId}`;
+
+            if (fs.existsSync(sessionPath)) {
+                const raw = fs.readFileSync(sessionPath, 'utf8');
+                const session = PHPUnserialize.unserializeSession(raw);
+
+                ws.user = {
+                    id: session.user_id || null,
+                    role: session.usertype || "customer"
+                };
+            }
+        }
+    } catch (err) {
+        console.error("Session load error:", err);
+    }
     ws.on('message', (message) => {
         const data = JSON.parse(message);
+        const action = data.event || data.type;
 
+        // 1. RBAC FIRST
+        if (!hasPermission(ws, action)) {
+            ws.send(JSON.stringify({
+                event: "security_error",
+                message: `Access denied for role: ${ws.user?.role || "guest"}`
+            }));
+            return;
+        }
         switch (data.event || data.type) {
             case "client_connected":
                 console.log(`[SYSTEM] Client Connected`);
@@ -158,9 +300,11 @@ wss.on('connection', (ws) => {
                 if (formattedDueAt && formattedDueAt.length <= 10) formattedDueAt = `${formattedDueAt} 00:00:00`;
 
                 const orderQuery = `INSERT INTO orders (customer_id, staff_id, price_total, status, created_at, due_at, address) VALUES (?, NULL, ?, 'processing', NOW(), ?, ?)`;
-                const address = data.delivery_address || null;
+                const address = data.delivery_address
+                ? sanitizeInput(data.delivery_address)
+                : null;
 
-                db.query(orderQuery, [data.customer_id, totalOrderPrice, formattedDueAt, address], (err, result) => {
+                db.execute(orderQuery, [data.customer_id, totalOrderPrice, formattedDueAt, address], (err, result) => {
                     if (err) return console.error(">> [SQL ERROR]:", err.sqlMessage);
                     const orderId = result.insertId;
 
@@ -173,7 +317,8 @@ wss.on('connection', (ws) => {
                                     db.query("SELECT stock, name FROM products WHERE prod_id = ?", [item.id], (selErr, selRes) => {
                                         if (!selErr && selRes.length > 0) {
                                             const newStock = parseInt(selRes[0].stock);
-                                            const stockMsg = `Stock for ${selRes[0].name} updated to ${newStock} via Order #${orderId}`;
+                                            const cleanProductName = sanitizeInput(selRes[0].name);
+                                            const stockMsg = `Stock for ${cleanProductName} updated to ${newStock} via Order #${orderId}`;
                                             
                                             broadcast(JSON.stringify({
                                                 event: "activity_alert",
@@ -189,14 +334,14 @@ wss.on('connection', (ws) => {
                         });
 
                         const itemValues = data.items.map(item => {
-                            const unitPrice = parseFloat(item.price);
+                            const unitPrice = Number(item.price) || 0;
                             const discount = parseFloat(item.discount || 0);
                             const subtotal = (unitPrice * (1 - (discount / 100))) * item.qty;
                             return [orderId, item.id, item.qty, unitPrice, discount, subtotal];
                         });
 
                         const itemsQuery = "INSERT INTO order_items (order_id, product, quantity, price, discount, subtotal) VALUES ?";
-                        db.query(itemsQuery, [itemValues], (itemErr) => { if (itemErr) console.error(itemErr); });
+                        db.execute(itemsQuery, [itemValues], (itemErr) => { if (itemErr) console.error(itemErr); });
                     }
 
                     broadcast(JSON.stringify({ 
@@ -204,7 +349,7 @@ wss.on('connection', (ws) => {
                         message: `Placed order #${orderId}` 
                     }));
                     
-                    logActivity(data.customer_id, "ORDER", `Placed order #${orderId}`);
+                    logActivity(ws.user.id, "ORDER", `Placed order #${orderId}`);
                     broadcast(JSON.stringify({ event: "order_confirmed", orderId: orderId }));
                     broadcastLiveStats();
                 });
@@ -215,7 +360,7 @@ wss.on('connection', (ws) => {
                     console.log(`[REQUEST] Delete Order #${delOrderId}`);
 
                     // Optional: delete order items first (if FK not cascading)
-                    db.query("DELETE FROM order_items WHERE order_id = ?", [delOrderId], (itemErr) => {
+                    db.execute("DELETE FROM order_items WHERE order_id = ?", [delOrderId], (itemErr) => {
                         if (itemErr) console.error(itemErr);
 
                         db.query("DELETE FROM orders WHERE order_id = ?", [delOrderId], (err) => {
@@ -235,7 +380,7 @@ wss.on('connection', (ws) => {
                                 orderId: delOrderId
                             }));
 
-                            logActivity(0, "ORDER_DELETE", `Order #${delOrderId} deleted`);
+                            logActivity(ws.user.id, "ORDER_DELETE", `Order #${delOrderId} deleted`);
                             broadcastLiveStats();
                         });
                     });
@@ -243,7 +388,7 @@ wss.on('connection', (ws) => {
                 case "update_order":
                     const updOrderId = data.payload.orderId;
                     const newDueTime = data.payload.dueTime;
-                    const newAddress = data.payload.address;
+                    const newAddress = sanitizeInput(data.payload.address);
 
                      console.log(`[REQUEST] Update Order #${updOrderId}`);
 
@@ -259,7 +404,7 @@ wss.on('connection', (ws) => {
                         WHERE order_id = ?
                     `;
 
-                    db.query(updateQuery, [formattedDue, newAddress, updOrderId], (err) => {
+                    db.execute(updateQuery, [formattedDue, newAddress, updOrderId], (err) => {
                         if (err) {
                             console.error("Update Error:", err);
                             ws.send(JSON.stringify({
@@ -279,13 +424,24 @@ wss.on('connection', (ws) => {
                             }
                         }));
 
-                        logActivity(0, "ORDER_UPDATE", `Order #${updOrderId} updated`);
+                        logActivity(ws.user.id, "ORDER_UPDATE", `Order #${updOrderId} updated`);
                         broadcastLiveStats();
                     });
                 break;
                 case "create_product":
-                    const { name: prodName, price, stock, discount, image: prodImage, category } = data.payload;
-                    db.query("INSERT INTO products (name, price, stock, discount, image_path, category) VALUES (?, ?, ?, ?, ?, ?)", [prodName, price, stock, discount, prodImage, category], (err, result) => {
+                    const {
+                                name: rawProdName,
+                                price,
+                                stock,
+                                discount,
+                                image: rawProdImage,
+                                category: rawCategory
+                            } = data.payload;
+
+                    const prodName = sanitizeInput(rawProdName);
+                    const prodImage = sanitizeInput(rawProdImage);
+                    const category = sanitizeInput(rawCategory);
+                    db.execute("INSERT INTO products (name, price, stock, discount, image_path, category) VALUES (?, ?, ?, ?, ?, ?)", [prodName, price, stock, discount, prodImage, category], (err, result) => {
                         if (err) {
                             console.error("Create Product Error:", err);
                             ws.send(JSON.stringify({ event: "error", message: "Failed to create product" }));
@@ -294,13 +450,24 @@ wss.on('connection', (ws) => {
                         const prodId = result.insertId;
                         console.log(`[ACTIVITY] Product "${prodName}" created with ID ${prodId}`);
                         broadcast(JSON.stringify({ event: "product_created", payload: { productId: prodId, name: prodName } }));
-                        logActivity(0, "PRODUCT_CREATE", `Created product "${prodName}"`);
+                        logActivity(ws.user.id, "PRODUCT_CREATE", `Created product "${prodName}"`);
                     });
                 break;
 
                 case "update_product":
-                    const { prod_id, name: updProdName, price: updPrice, stock: updStock, discount: updDiscount, image: updImage, category: updCategory } = data.payload;
-                    db.query("UPDATE products SET name=?, price=?, stock=?, discount=?, image_path=?, category=? WHERE prod_id=?", [updProdName, updPrice, updStock, updDiscount, updImage, updCategory, prod_id], (err) => {
+                    const {
+                            prod_id,
+                            name: rawUpdProdName,
+                            price: updPrice,
+                            stock: updStock,
+                            discount: updDiscount,
+                            image: rawUpdImage,
+                            category: rawUpdCategory
+                        } = data.payload;
+                    const updProdName = sanitizeInput(rawUpdProdName);
+                    const updImage = sanitizeInput(rawUpdImage);
+                    const updCategory = sanitizeInput(rawUpdCategory);
+                    db.execute("UPDATE products SET name=?, price=?, stock=?, discount=?, image_path=?, category=? WHERE prod_id=?", [updProdName, updPrice, updStock, updDiscount, updImage, updCategory, prod_id], (err) => {
                         if (err) {
                             console.error("Update Product Error:", err);
                             ws.send(JSON.stringify({ event: "error", message: "Failed to update product" }));
@@ -308,14 +475,14 @@ wss.on('connection', (ws) => {
                         }
                         console.log(`[ACTIVITY] Product "${updProdName}" updated`);
                         broadcast(JSON.stringify({ event: "product_updated", payload: { productId: prod_id, name: updProdName } }));
-                        logActivity(0, "PRODUCT_UPDATE", `Updated product "${updProdName}"`);
+                        logActivity(ws.user.id, "PRODUCT_UPDATE", `Updated product "${updProdName}"`);
                         broadcastLiveStats(); // In case stock changed
                     });
                 break;
 
                 case "delete_product":
                     const { productId } = data.payload;
-                    db.query("SELECT name FROM products WHERE prod_id=?", [productId], (err, res) => {
+                    db.execute("SELECT name FROM products WHERE prod_id=?", [productId], (err, res) => {
                         if (err) {
                             console.error("Select Product Error:", err);
                             return;
@@ -325,7 +492,7 @@ wss.on('connection', (ws) => {
                             return;
                         }
                         const prodName = res[0].name;
-                        db.query("DELETE FROM products WHERE prod_id=?", [productId], (delErr) => {
+                        db.execute("DELETE FROM products WHERE prod_id=?", [productId], (delErr) => {
                             if (delErr) {
                                 console.error("Delete Product Error:", delErr);
                                 ws.send(JSON.stringify({ event: "error", message: "Failed to delete product" }));
@@ -333,15 +500,21 @@ wss.on('connection', (ws) => {
                             }
                             console.log(`[ACTIVITY] Product "${prodName}" deleted`);
                             broadcast(JSON.stringify({ event: "product_deleted", payload: { productId: productId, name: prodName } }));
-                            logActivity(0, "PRODUCT_DELETE", `Deleted product "${prodName}"`);
+                            logActivity(ws.user.id, "PRODUCT_DELETE", `Deleted product "${prodName}"`);
                             broadcastLiveStats();
                         });
                     });
                 break;
 
                 case "create_category":
-                    const { name: categName, image: categImage } = data.payload;
-                    db.query("INSERT INTO categories (name, image_path) VALUES (?, ?)", [categName, categImage], (err, result) => {
+                    const {
+                            name: rawCategName,
+                            image: rawCategImage
+                        } = data.payload;
+
+                    const categName = sanitizeInput(rawCategName);
+                    const categImage = sanitizeInput(rawCategImage);
+                    db.execute("INSERT INTO categories (name, image_path) VALUES (?, ?)", [categName, categImage], (err, result) => {
                         if (err) {
                             console.error("Create Category Error:", err);
                             ws.send(JSON.stringify({ event: "error", message: "Failed to create category" }));
@@ -350,13 +523,19 @@ wss.on('connection', (ws) => {
                         const categId = result.insertId;
                         console.log(`[ACTIVITY] Category "${categName}" created with ID ${categId}`);
                         broadcast(JSON.stringify({ event: "category_created", payload: { categoryId: categId, name: categName } }));
-                        logActivity(0, "CATEGORY_CREATE", `Created category "${categName}"`);
+                        logActivity(ws.user.id, "CATEGORY_CREATE", `Created category "${categName}"`);
                     });
                 break;
 
                 case "update_category":
-                    const { categ_id, name: updCategName, image: updCategImage } = data.payload;
-                    db.query("UPDATE categories SET name=?, image_path=? WHERE categ_id=?", [updCategName, updCategImage, categ_id], (err) => {
+                    const {
+                            categ_id,
+                            name: rawUpdCategName,
+                            image: rawUpdCategImage
+                        } = data.payload;
+                    const updCategName = sanitizeInput(rawUpdCategName);
+                    const updCategImage = sanitizeInput(rawUpdCategImage);
+                    db.execute("UPDATE categories SET name=?, image_path=? WHERE categ_id=?", [updCategName, updCategImage, categ_id], (err) => {
                         if (err) {
                             console.error("Update Category Error:", err);
                             ws.send(JSON.stringify({ event: "error", message: "Failed to update category" }));
@@ -364,13 +543,13 @@ wss.on('connection', (ws) => {
                         }
                         console.log(`[ACTIVITY] Category "${updCategName}" updated`);
                         broadcast(JSON.stringify({ event: "category_updated", payload: { categoryId: categ_id, name: updCategName } }));
-                        logActivity(0, "CATEGORY_UPDATE", `Updated category "${updCategName}"`);
+                        logActivity(ws.user.id, "CATEGORY_UPDATE", `Updated category "${updCategName}"`);
                     });
                 break; 
 
                 case "delete_category":
                     const { categoryId } = data.payload;
-                    db.query("SELECT name FROM categories WHERE categ_id=?", [categoryId], (err, res) => {
+                    db.execute("SELECT name FROM categories WHERE categ_id=?", [categoryId], (err, res) => {
                         if (err) {
                             console.error("Select Category Error:", err);
                             return;
@@ -380,7 +559,7 @@ wss.on('connection', (ws) => {
                             return;
                         }
                         const categName = res[0].name;
-                        db.query("DELETE FROM categories WHERE categ_id=?", [categoryId], (delErr) => {
+                        db.execute("DELETE FROM categories WHERE categ_id=?", [categoryId], (delErr) => {
                             if (delErr) {
                                 console.error("Delete Category Error:", delErr);
                                 ws.send(JSON.stringify({ event: "error", message: "Failed to delete category" }));
@@ -388,13 +567,14 @@ wss.on('connection', (ws) => {
                             }
                             console.log(`[ACTIVITY] Category "${categName}" deleted`);
                             broadcast(JSON.stringify({ event: "category_deleted", payload: { categoryId: categoryId, name: categName } }));
-                            logActivity(0, "CATEGORY_DELETE", `Deleted category "${categName}"`);
+                            logActivity(ws.user.id, "CATEGORY_DELETE", `Deleted category "${categName}"`);
                         });
                     });
                 break;
                 case "update_staff_delivery":
-                    const { order_id, status } = data.payload;
-                    db.query("UPDATE orders SET status = ? WHERE order_id = ?", [status, order_id], (err) => {
+                    const order_id = data.payload.order_id;
+                    const status = sanitizeInput(data.payload.status);
+                    db.execute("UPDATE orders SET status = ? WHERE order_id = ?", [status, order_id], (err) => {
                         if (err) {
                             console.error("Update Delivery Error:", err);
                             ws.send(JSON.stringify({ event: "error", message: "Failed to update delivery status" }));
@@ -402,7 +582,7 @@ wss.on('connection', (ws) => {
                         }
                         console.log(`[ACTIVITY] Order "${order_id}" status updated to "${status}"`);
                         broadcast(JSON.stringify({ event: "order_updated", payload: { orderId: order_id, status: status } }));
-                        logActivity(0, "ORDER_UPDATE", `Updated order "${order_id}" status to "${status}"`);
+                        logActivity(ws.user.id, "ORDER_UPDATE", `Updated order "${order_id}" status to "${status}"`);
                     });
                 break;
             }

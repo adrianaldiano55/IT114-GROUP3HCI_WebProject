@@ -2,6 +2,18 @@
 require_once 'auth_terminal.php';
 require_once 'config.php';
 
+// check if user is logged in
+if (!isset($_SESSION['user_id'])) {
+    header("Location: login.php");
+    exit();
+}
+
+// check role
+if (!isset($_SESSION['usertype']) || $_SESSION['usertype'] !== 'admin') {
+    http_response_code(403);
+    echo "403 Forbidden - Admins only";
+    exit();
+}
 
 $productStmt = $pdo->query("SELECT prod_id, name, price, stock, discount, image_path, category FROM products");
 $products = $productStmt->fetchAll(PDO::FETCH_ASSOC); 
@@ -10,6 +22,27 @@ $categoryStmt = $pdo->query("SELECT categ_id, name, image_path FROM categories")
 $categories = $categoryStmt->fetchAll(PDO::FETCH_ASSOC);
 
 $status = $_GET['status'] ?? 'Product';
+
+$itemStmt = $pdo->query("
+    SELECT m.prod_id, m.name, m.price, m.stock, m.discount, m.image_path,
+        c.name AS category_name, c.categ_id AS category
+    FROM products m
+    LEFT JOIN categories c ON c.categ_id = m.category
+    ORDER BY c.name, m.name
+");
+$items = $itemStmt->fetchAll(PDO::FETCH_ASSOC);
+
+$itemsByCategory = [];
+foreach ($items as $item) {
+    $itemsByCategory[$item['category']][] = $item;
+}
+// Fetch orders
+$user_id = $_SESSION['user_id'];
+
+
+function e($str) {
+    return htmlspecialchars((string)$str, ENT_QUOTES, 'UTF-8');
+}
 ?>
 
 <!DOCTYPE html>
@@ -123,6 +156,24 @@ $status = $_GET['status'] ?? 'Product';
         border: 1px solid #ddd;
         padding: 8px 15px;
     }
+
+    #activityFeed {
+        height: 100px;
+        overflow-y: auto;
+        font-size: 0.8rem;
+    }
+
+    .feed-item {
+        padding: 5px 0;
+        border-bottom: 1px solid #f8f9fa;
+        animation: fadeIn 0.5s ease;
+    }
+
+    @keyframes fadeIn {
+        from { opacity: 0; }
+    to { opacity: 1; }
+    }
+
 </style>
 </head>
 <body>
@@ -131,6 +182,14 @@ $status = $_GET['status'] ?? 'Product';
     <div class="container-fluid d-flex justify-content-between align-items-center px-4">
             <img src="images/logo.png" alt="Logo" class="nav-logo"> 
         <div class="header-right">
+            <form method="POST" action="audit_logs.php" class="m-0">
+                <input type="hidden" name="csrf_token"
+                        value="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
+                <button type="submit"
+                    class="dropdown-item text-danger fw-bold border-0 bg-transparent w-100 text-start">
+                        Audit Logs
+                </button>
+            </form>
             <div class="dropdown">
                 <button class="header-icon-btn dropdown-toggle" type="button" data-bs-toggle="dropdown">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -139,9 +198,19 @@ $status = $_GET['status'] ?? 'Product';
                 </button>
                 <ul class="dropdown-menu dropdown-menu-end border-0 shadow-lg mt-2 p-3" style="border-radius: 15px; min-width: 200px;">
                     <li class="px-2 mb-2"><small class="text-muted text-uppercase fw-bold">User Information</small></li>
-                    <li><span class="dropdown-item fw-bold text-primary">@<?= htmlspecialchars($_SESSION['username'] ?? 'User') ?></span></li>
+                    <li><span class="dropdown-item fw-bold text-primary">@<?= e($_SESSION['username'] ?? 'User') ?></span></li>
                     <li><hr class="dropdown-divider"></li>
-                    <li><a class="dropdown-item text-danger fw-bold" href="logout.php">Logout</a></li>
+                    <li>
+                        <form method="POST" action="logout.php" class="m-0">
+                            <input type="hidden" name="csrf_token"
+                                value="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
+
+                            <button type="submit"
+                                class="dropdown-item text-danger fw-bold border-0 bg-transparent w-100 text-start">
+                                Logout
+                            </button>
+                        </form>
+                    </li>
                 </ul>
             </div>
         </div>
@@ -150,7 +219,7 @@ $status = $_GET['status'] ?? 'Product';
 
 <div class="container mt-4">
     <div class="orders-container">
-        <div class="col-lg-9 col-12">
+        <div class="col-12">
             <div class="row g-3 mb-4">
 
                 <div class="col-md-3">
@@ -229,26 +298,22 @@ $status = $_GET['status'] ?? 'Product';
                     <?php else: ?>
                         <?php foreach ($products as $p): ?>
                             <tr>
-                                <td class="fw-bold"><?= (int)$p['prod_id'] ?></td>
-                                <td class="fw-bold"><?= $p['name'] ?></td>
+                                <td class="fw-bold"><?= e((int)$p['prod_id']) ?></td>
+                                <td class="fw-bold"><?= e($p['name']) ?></td>
                                 <td class="fw-small"><?= number_format((float)$p['price'], 2) ?></td>
-                                <td class="fw-small"><?= (int)$p['stock'] ?></td>
-                                <td class="fw-small"><?= (float)$p['discount'] ?>%</td>
-                                <td class="fw-small"><img src="<?= htmlspecialchars($p['image_path']) ?>" alt="Product Image" style="width: 50px; height: 50px; object-fit: cover; border-radius: 5px;"></td>
-                                <td class="fw-small"><?= htmlspecialchars($p['category'] ?? 'None') ?></td>
+                                <td class="fw-small"><?= e((int)$p['stock']) ?></td>
+                                <td class="fw-small"><?= e((float)$p['discount']) ?>%</td>
+                                <td class="fw-small"><?php $img = $p['image_path']; if (!preg_match('#^/|https?://|images/#', $img)) {
+                                        $img = 'images/default.jpg';
+                                    }?>
+                                <img src="<?= e($img) ?>" alt="Product Image" style="width: 50px; height: 50px; object-fit: cover; border-radius: 5px;"></td>
+                                <td class="fw-small"><?= e($p['category'] ?? 'None') ?></td>
                                 <td>    
-                                    <button class="btn btn-sm btn-outline-secondary fw-bold px-3 rounded-pill" 
-                                        onclick="updateProduct(
-                                            <?= (int)$p['prod_id'] ?>,
-                                            '<?= htmlspecialchars($p['name'] ?? '', ENT_QUOTES) ?>',
-                                            '<?= htmlspecialchars((string)($p['price'] ?? ''), ENT_QUOTES) ?>',
-                                            '<?= htmlspecialchars((string)($p['stock'] ?? ''), ENT_QUOTES) ?>',
-                                            '<?= (float)($p['discount'] ?? 0) ?>',
-                                            '<?= htmlspecialchars($p['image_path'] ?? '', ENT_QUOTES) ?>',
-                                            '<?= htmlspecialchars($p['category'] ?? '', ENT_QUOTES) ?>'
-                                        )">
+                                    <button class="btn btn-sm btn-outline-secondary"
+                                        data-prod='<?= e(json_encode($p, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT)) ?>'
+                                        onclick="openUpdateProduct(this)">
                                         Update
-                                    </button>                                    
+                                    </button>                              
                                     <button class="btn btn-sm btn-outline-primary px-3 rounded-pill"
                                         onclick="deleteProduct(
                                             <?= (int)$p['prod_id'] ?>,
@@ -267,7 +332,7 @@ $status = $_GET['status'] ?? 'Product';
                         <?php foreach ($categories as $c): ?>
                             <tr>
                                 <td class="fw-bold"><?= (int)$c['categ_id'] ?></td>
-                                <td class="fw-bold"><?= $c['name'] ?></td>
+                                <td class="fw-bold"><?= e($c['name']) ?></td>
                                 <td class="fw-small"><img src="<?= htmlspecialchars($c['image_path']) ?>" alt="Category Image" style="width: 50px; height: 50px; object-fit: cover; border-radius: 5px;"></td>
                                 <td>    
                                     <button class="btn btn-sm btn-outline-secondary fw-bold px-3 rounded-pill" 
@@ -394,17 +459,48 @@ $status = $_GET['status'] ?? 'Product';
     </div>
 </div>
 
+<!-- CSRF TOKEN -->
+<script>
+const csrfToken = <?= json_encode($_SESSION['csrf_token']) ?>;
+</script>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
 let cart = {}; 
+let stockChart = null;
 const userid = "<?= $_SESSION['user_id'] ?>";
-
-const socket = new WebSocket("ws://localhost:3000?usertype=customer");
+const categoryNames = <?= json_encode(
+    array_column($categories, 'name', 'categ_id')
+) ?>;
+const socket = new WebSocket("ws://localhost:3000?usertype=admin");
 
 socket.onopen = function() {
     socket.send(JSON.stringify({ event: "client_connected", userid: userid }));
 };
-
+// --- INITIALIZE CHART ---
+function initStockChart() {
+    const ctx = document.getElementById('stockChart').getContext('2d');
+    stockChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: [], 
+            datasets: [{
+                label: 'Qty',
+                data: [],
+                backgroundColor: '#ff6600',
+                borderRadius: 4
+            }]
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: { x: { display: false }, y: { ticks: { font: { size: 9 } }, grid: { display: false } } }
+        }
+    });
+}
 
 // =========================
 // WEBSOCKET MESSAGE HANDLER 
@@ -413,6 +509,38 @@ socket.onmessage = function(event) {
     const data = JSON.parse(event.data);
 
     console.log("WS Message:", data);
+
+    // Dynamic extraction logic for dashboard panels
+    if (data.event === "initial_logs") {
+        const feed = document.getElementById('activityFeed');
+        if (feed) {
+            feed.innerHTML = ''; 
+            data.logs.forEach(log => appendToFeed(log.message));
+        }
+    }
+
+    if (data.event === "live_stats") {
+        const liveCounter = document.getElementById('liveOrderCount');
+        if (liveCounter) {
+            liveCounter.innerText = data.total_orders;
+        }
+    }
+
+    if (data.event === "activity_alert") {
+        appendToFeed(data.message);
+    }
+
+    if (data.event === "stock_update" && stockChart) {
+
+        const labels = Object.keys(data.chartData).map(id => {
+            return categoryNames[id] || `Cat ${id}`;
+        });
+
+        stockChart.data.labels = labels;
+        stockChart.data.datasets[0].data = Object.values(data.chartData);
+
+        stockChart.update('none');
+    }
 
     const refreshEvents = [
         "order_updated",
@@ -426,12 +554,34 @@ socket.onmessage = function(event) {
         "category_created",
         "category_updated",
         "category_deleted",
-        "activity_alert"
     ];
     if (refreshEvents.includes(data.event)) {
         location.reload();
     }
 };
+
+function appendToFeed(msg) {
+    const feed = document.getElementById('activityFeed');
+
+    if (!feed) return;
+
+    const div = document.createElement('div');
+
+    div.className = 'feed-item';
+    div.style.fontSize = "0.85rem";
+    div.style.marginBottom = "5px";
+
+    const span = document.createElement('span');
+    span.textContent = msg;
+
+    div.appendChild(span)
+
+    feed.prepend(div);
+
+    if (feed.childNodes.length > 5) {
+        feed.removeChild(feed.lastChild);
+    }
+}
 
 // =========================
 // SET TABLE STATUS (NEW)
@@ -469,17 +619,19 @@ function addCategory() {
 // =========================
 // UPDATE PRODUCT (CHANGED)
 // =========================
-function updateProduct(prod_id, name, price, stock, discount, image_path, category) {
-    document.getElementById('updProdId').value = prod_id;
-    document.getElementById('updName').value = name;
-    document.getElementById('updPrice').value = price;
-    document.getElementById('updStock').value = stock;
-    document.getElementById('updDiscount').value = discount;
-    document.getElementById('updProductImagePreview').src = image_path;
-    document.getElementById('updCategory').value = category;
+function openUpdateProduct(btn) {
+    const p = JSON.parse(btn.dataset.prod);
+
+    document.getElementById('updProdId').value = p.prod_id;
+    document.getElementById('updName').value = p.name;
+    document.getElementById('updPrice').value = p.price;
+    document.getElementById('updStock').value = p.stock;
+    document.getElementById('updDiscount').value = p.discount;
+    document.getElementById('updProductImagePreview').src = p.image_path;
+    document.getElementById('updCategory').value = p.category;
+
     new bootstrap.Modal(document.getElementById('updateProductModal')).show();
 }
-
 // =========================
 // UPDATE CATEGORY (CHANGED)
 // =========================
@@ -504,6 +656,7 @@ function deleteProduct(prodId) {
 
     socket.send(JSON.stringify({
         type: "delete_product",
+        csrf_token: csrfToken,
         payload: { productId: prodId }
     }));
 }
@@ -521,6 +674,7 @@ function deleteCategory(categId) {
 
     socket.send(JSON.stringify({
         type: "delete_category",
+        csrf_token: csrfToken,
         payload: { categoryId: categId }
     }));
 }
@@ -583,7 +737,7 @@ function submitupdateCategory() {
 // =========================
 // SEND UPDATE VIA WS
 // =========================
-function updateProductWS(prod_id, name, price, stock, discount, image, category) {
+function updateProductWS(prod_id, name, price, stock, discount, category, image) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
         console.error("WebSocket not connected");
         return;
@@ -591,6 +745,7 @@ function updateProductWS(prod_id, name, price, stock, discount, image, category)
 
     socket.send(JSON.stringify({
         type: "update_product",
+        csrf_token: csrfToken,
         payload: {
             prod_id: prod_id,
             name: name,
@@ -611,6 +766,7 @@ function updateCategoryWS(categ_id, name, image) {
 
     socket.send(JSON.stringify({
         type: "update_category",
+        csrf_token: csrfToken,
         payload: {
             categ_id: categ_id,
             name: name,
@@ -630,6 +786,7 @@ function createProductWS(name, price, stock, discount, category, image) {
 
     socket.send(JSON.stringify({
         type: "create_product",
+        csrf_token: csrfToken,
         payload: {
             name: name,
             price: price,
@@ -649,12 +806,17 @@ function createCategoryWS(name, image) {
 
     socket.send(JSON.stringify({
         type: "create_category",
+        csrf_token: csrfToken,
         payload: {
             name: name,
             image: image
         }
     }));
 }
+
+document.addEventListener('DOMContentLoaded', () => {
+    initStockChart();
+});
 </script>
 </body>
 </html>
