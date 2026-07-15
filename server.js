@@ -1,13 +1,51 @@
 const WebSocket = require('ws');
 const mysql = require('mysql2');
 const fs = require('fs');
+const path = require('path');
 const PHPUnserialize = require('php-unserialize');
 
+function loadEnvFile(filePath) {
+    if (!fs.existsSync(filePath)) {
+        return;
+    }
+
+    const contents = fs.readFileSync(filePath, 'utf8');
+    for (const rawLine of contents.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) {
+            continue;
+        }
+
+        const equals = line.indexOf('=');
+        if (equals === -1) {
+            continue;
+        }
+
+        const key = line.slice(0, equals).trim();
+        let value = line.slice(equals + 1).trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+        }
+
+        if (process.env[key] === undefined) {
+            process.env[key] = value;
+        }
+    }
+}
+
+loadEnvFile(path.join(__dirname, '.env'));
+
+for (const requiredEnv of ['DB_HOST', 'DB_USER', 'DB_DATABASE', 'ADMIN_USER', 'ADMIN_PASS']) {
+    if (process.env[requiredEnv] === undefined) {
+        throw new Error(`Missing required environment variable: ${requiredEnv}`);
+    }
+}
+
 const db = mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: '', 
-    database: 'faydss'
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_DATABASE
 });
 
 // ROLE BASED PERMISSIONS  
@@ -233,8 +271,9 @@ setInterval(() => {
     });
 }, 3000);
 
-const wss = new WebSocket.Server({ port: 3000 });
-console.log(">> [SYSTEM] WebSocket Server Running on Port 3000");
+const wsPort = Number(process.env.WS_PORT || 3000);
+const wss = new WebSocket.Server({ port: wsPort });
+console.log(`>> [SYSTEM] WebSocket Server Running on Port ${wsPort}`);
 
 wss.on('connection', (ws, req) => {
     const cookies = req.headers.cookie || '';
